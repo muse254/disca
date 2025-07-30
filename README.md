@@ -38,7 +38,3 @@ Input: WebAssembly Module
 │ - Wires: 7              │
 └─────────────────────────┘
 ```
-
-## License
-
-MIT License
