@@ -1,6 +1,11 @@
-[package]
-name = "disca"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = ["disca-parser", "disca-parser/wasm_program"]
 
-[dependencies]
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Osoro Bironga <fansoro@gmail.com>"]
+repository = "https://github.com/muse254/disca"
+description = "Discrete Compute Automata - Privacy-preserving computation with WASM-to-FHE conversion"
