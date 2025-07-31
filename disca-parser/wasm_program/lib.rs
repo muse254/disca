@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 thread_local! {
-    static STATE: RefCell<i32> = RefCell::new(0);
+    static STATE: RefCell<i32> = const{ RefCell::new(0) };
 }
 
 #[unsafe(no_mangle)]

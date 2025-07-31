@@ -181,8 +181,9 @@ impl CircuitOptimizer {
 
         for gate in &circuit.gates {
             let gate_key = format!("{:?}", gate);
-            if !seen_computations.contains_key(&gate_key) {
-                seen_computations.insert(gate_key, unique_gates.len());
+            if let std::collections::hash_map::Entry::Vacant(e) = seen_computations.entry(gate_key)
+            {
+                e.insert(unique_gates.len());
                 unique_gates.push(gate.clone());
             }
         }

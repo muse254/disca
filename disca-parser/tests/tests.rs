@@ -1,15 +1,14 @@
 use disca_parser::prelude::*;
 use disca_parser::{OptimizationLevel, OutputFormat};
 
-const WASM_PATH: &str = "wasm_program/wasm_program.wasm";
+const WASM_BYTES: &[u8] = include_bytes!("../wasm_program/wasm_program.wasm");
 
 #[test]
 fn test_wasm_parsing() {
-    let wasm_bytes = load_test_wasm();
     let parser = WasmParser::new();
 
     // Test logic circuit parsing
-    let logic_result = parser.parse_to_logic_circuit(&wasm_bytes);
+    let logic_result = parser.parse_to_logic_circuit(&WASM_BYTES);
     assert!(logic_result.is_ok(), "Should parse WASM to logic circuit");
     let logic_circuit = logic_result.unwrap();
     assert!(
@@ -18,7 +17,7 @@ fn test_wasm_parsing() {
     );
 
     // Test binary circuit parsing
-    let binary_result = parser.parse_to_binary_circuit(&wasm_bytes);
+    let binary_result = parser.parse_to_binary_circuit(&WASM_BYTES);
     assert!(binary_result.is_ok(), "Should parse WASM to binary circuit");
     let binary_circuit = binary_result.unwrap();
     assert!(
@@ -39,9 +38,8 @@ fn test_wasm_parsing() {
 
 #[test]
 fn test_circuit_properties() {
-    let wasm_bytes = load_test_wasm();
     let parser = WasmParser::new();
-    let circuit = parser.parse_to_binary_circuit(&wasm_bytes).unwrap();
+    let circuit = parser.parse_to_binary_circuit(&WASM_BYTES).unwrap();
 
     // Basic structure checks
     assert!(circuit.wire_count > 0, "Should have wires");
@@ -94,9 +92,8 @@ fn test_gate_execution() {
 
 #[test]
 fn test_serialization() {
-    let wasm_bytes = load_test_wasm();
     let parser = WasmParser::new();
-    let circuit = parser.parse_to_binary_circuit(&wasm_bytes).unwrap();
+    let circuit = parser.parse_to_binary_circuit(&WASM_BYTES).unwrap();
 
     // Test JSON serialization
     let json = circuit.to_json().unwrap();
@@ -122,15 +119,13 @@ fn test_serialization() {
 
 #[test]
 fn test_optimization() {
-    let wasm_bytes = load_test_wasm();
-
     // Test without optimization
     let parser_none = WasmParser::new();
-    let circuit_none = parser_none.parse_to_binary_circuit(&wasm_bytes).unwrap();
+    let circuit_none = parser_none.parse_to_binary_circuit(&WASM_BYTES).unwrap();
 
     // Test with basic optimization
     let parser_basic = WasmParser::with_optimization(OptimizationLevel::Basic);
-    let circuit_basic = parser_basic.parse_to_binary_circuit(&wasm_bytes).unwrap();
+    let circuit_basic = parser_basic.parse_to_binary_circuit(&WASM_BYTES).unwrap();
 
     assert!(
         !circuit_none.gates.is_empty(),
@@ -150,9 +145,8 @@ fn test_optimization() {
 
 #[test]
 fn test_logic_tracking() {
-    let wasm_bytes = load_test_wasm();
     let parser = WasmParser::new();
-    let circuit = parser.parse_to_binary_circuit(&wasm_bytes).unwrap();
+    let circuit = parser.parse_to_binary_circuit(&WASM_BYTES).unwrap();
 
     // Check for expected WASM function operations
     let add_count = circuit.gates.iter().filter(|g| g.opcode == 0x00).count();
@@ -175,9 +169,8 @@ fn test_logic_tracking() {
 
 #[test]
 fn test_output_formats() {
-    let wasm_bytes = load_test_wasm();
     let parser = WasmParser::new();
-    let logic_circuit = parser.parse_to_logic_circuit(&wasm_bytes).unwrap();
+    let logic_circuit = parser.parse_to_logic_circuit(&WASM_BYTES).unwrap();
 
     // Test all output formats
     for format in [OutputFormat::Text, OutputFormat::Json, OutputFormat::Binary] {
@@ -206,9 +199,8 @@ fn test_error_handling() {
 
 #[test]
 fn test_circuit_validation() {
-    let wasm_bytes = load_test_wasm();
     let parser = WasmParser::new();
-    let logic_circuit = parser.parse_to_logic_circuit(&wasm_bytes).unwrap();
+    let logic_circuit = parser.parse_to_logic_circuit(&WASM_BYTES).unwrap();
 
     // Analyze and validate the circuit
     let stats = disca_parser::utils::analyze_circuit(&logic_circuit);
@@ -220,9 +212,8 @@ fn test_circuit_validation() {
 
 #[test]
 fn test_wire_consistency() {
-    let wasm_bytes = load_test_wasm();
     let parser = WasmParser::new();
-    let circuit = parser.parse_to_binary_circuit(&wasm_bytes).unwrap();
+    let circuit = parser.parse_to_binary_circuit(&WASM_BYTES).unwrap();
 
     // Basic sanity checks for the circuit structure
     assert!(circuit.wire_count > 0, "Should have some wires");
@@ -256,9 +247,4 @@ fn test_wire_consistency() {
         all_wires.len(),
         circuit.gates.len()
     );
-}
-
-// Helper function to load test WASM
-fn load_test_wasm() -> Vec<u8> {
-    std::fs::read(WASM_PATH).unwrap_or_else(|_| panic!("Failed to read WASM file at {}", WASM_PATH))
 }
