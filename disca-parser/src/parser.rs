@@ -48,9 +48,7 @@ impl WasmParser {
 
     /// Create a parser with specific optimization level
     pub fn with_optimization(optimization_level: OptimizationLevel) -> Self {
-        Self {
-            optimization_level,
-        }
+        Self { optimization_level }
     }
 
     /// Parse WASM bytes and return a legacy logic circuit
@@ -95,6 +93,7 @@ impl WasmParser {
     fn parse_wasm_module(&self, wasm_bytes: &[u8]) -> Result<WasmModule> {
         let mut module = WasmModule::new();
         module.parse(wasm_bytes)?;
+        log::debug!("WASM_MODULE: {:#?}", module);
         Ok(module)
     }
 }
@@ -149,10 +148,7 @@ pub mod utils {
     }
 
     /// Convert between different circuit formats
-    pub fn convert_format(
-        circuit: &LogicCircuit,
-        format: OutputFormat,
-    ) -> Result<String> {
+    pub fn convert_format(circuit: &LogicCircuit, format: OutputFormat) -> Result<String> {
         match format {
             OutputFormat::Json => {
                 let binary = BinaryCircuit::from_logic_circuit(circuit)?;
