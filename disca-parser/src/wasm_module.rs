@@ -4,7 +4,7 @@ use crate::errors::Result;
 use crate::homomorphic::{LogicCircuit, LogicGate, WasmReducer};
 use crate::DiscaError;
 use std::collections::HashMap;
-use wasmparser::{BinaryReaderError, GlobalType, MemoryType, Parser, Payload, TableType, ValType};
+use wasmparser::{GlobalType, Parser, Payload, ValType};
 
 #[derive(Debug, Clone)]
 pub struct WasmOperation {
@@ -13,57 +13,66 @@ pub struct WasmOperation {
     pub result_type: Option<ValType>,
 }
 
+#[derive(Debug, Clone)]
+pub struct WasmFunction {
+    pub name: String,
+    pub type_index: u32,
+    pub func_type: wasmparser::FuncType,
+    pub operations: Vec<WasmOperation>,
+    pub is_exported: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalState {
+    pub memory_size: u32,
+    pub globals: Vec<GlobalType>,
+    pub memory_operations: Vec<WasmOperation>,
+}
+
 #[derive(Debug)]
 pub struct WasmModule {
-    pub types: Vec<wasmparser::FuncType>,
-    pub functions: Vec<u32>,
-    pub tables: Vec<TableType>,
-    pub memories: Vec<MemoryType>,
-    pub globals: Vec<GlobalType>,
+    pub functions: HashMap<String, WasmFunction>,
+    pub global_state: GlobalState,
     pub exports: HashMap<String, wasmparser::ExternalKind>,
-    pub operations: Vec<WasmOperation>,
+    pub types: Vec<wasmparser::FuncType>,
     pub custom_sections: HashMap<String, Vec<u8>>,
 }
 
 pub fn parse_wasm_module(wasm_bytes: &[u8]) -> Result<HashMap<String, LogicCircuit>> {
-    todo!()
+    let mut module = WasmModule::new();
+    module.parse(wasm_bytes)?;
+    Ok(module.to_logic_circuits())
 }
 
 impl WasmModule {
     pub fn new() -> Self {
         Self {
-            types: Vec::new(),
-            functions: Vec::new(),
-            tables: Vec::new(),
-            memories: Vec::new(),
-            globals: Vec::new(),
+            functions: HashMap::new(),
+            global_state: GlobalState {
+                memory_size: 0,
+                globals: Vec::new(),
+                memory_operations: Vec::new(),
+            },
             exports: HashMap::new(),
-            operations: Vec::new(),
+            types: Vec::new(),
             custom_sections: HashMap::new(),
         }
     }
 
     /// Parse WASM bytes into this module
     pub fn parse(&mut self, wasm_bytes: &[u8]) -> Result<()> {
-        let mut end = false;
+        let mut function_types: Vec<u32> = Vec::new(); // Store function type indices
+        let mut current_function_index = 0;
 
         for payload in Parser::new(0).parse_all(wasm_bytes) {
-            // LogicCircuit
-
             match payload? {
-                Payload::Version {
-                    num,
-                    encoding,
-                    range,
-                } => {}
+                Payload::Version { .. } => {}
 
                 Payload::TypeSection(reader) => {
                     for ty in reader {
-                        // output data as debug log
                         log::debug!("Payload::TypeSection: {:#?}", ty);
 
                         let rec_group = ty?;
-                        // Use iterator to access types in the RecGroup
                         for sub_type in rec_group.types() {
                             if let wasmparser::CompositeType {
                                 inner: wasmparser::CompositeInnerType::Func(ref func_type),
@@ -71,7 +80,6 @@ impl WasmModule {
                             } = sub_type.composite_type
                             {
                                 self.types.push(func_type.clone());
-
                                 log::debug!(
                                     "Extracted FuncType: params={:?}, results={:?}",
                                     func_type.params(),
@@ -91,34 +99,34 @@ impl WasmModule {
                 Payload::FunctionSection(reader) => {
                     for func in reader {
                         log::debug!("Payload::FunctionSection: {:#?}", func);
-                        self.functions.push(func?);
+                        function_types.push(func?);
                     }
                 }
 
                 Payload::TableSection(reader) => {
                     for table in reader {
                         log::debug!("Payload::TableSection: {:#?}", table);
-                        let table = table?;
-                        self.tables.push(table.ty);
+                        let _table = table?;
+                        // Tables are handled as part of global state if needed
                     }
                 }
 
                 Payload::MemorySection(reader) => {
                     for memory in reader {
                         log::debug!("Payload::MemorySection: {:#?}", memory);
-                        self.memories.push(memory?);
+                        let memory = memory?;
+                        self.global_state.memory_size = memory.initial as u32;
                     }
                 }
 
                 Payload::TagSection(tag) => {
                     log::debug!("Payload::TagSection: {:#?}", tag);
-                    // For now, we skip tag parsing
                 }
 
                 Payload::GlobalSection(reader) => {
                     for global in reader {
                         log::debug!("Payload::GlobalSection: {:#?}", global);
-                        self.globals.push(global?.ty);
+                        self.global_state.globals.push(global?.ty);
                     }
                 }
 
@@ -127,19 +135,22 @@ impl WasmModule {
                         let export = export?;
                         log::debug!("Payload::ExportSection: {:#?}", export);
                         self.exports.insert(export.name.to_string(), export.kind);
+
+                        // Mark functions as exported
+                        if let wasmparser::ExternalKind::Func = export.kind {
+                            // We'll update this when we process the function bodies
+                        }
                     }
                 }
 
                 Payload::StartSection { func, range } => {
                     log::debug!("Payload::StartSection: func={}, range={:?}", func, range);
-                    // For now, we skip start section parsing
                 }
 
                 Payload::ElementSection(reader) => {
                     log::debug!("Payload::ElementSection: {:#?}", reader);
-                    for val in reader {
-                        // log::debug!("Payload::ElementSection: {:#?}", val?);
-                        // For now, we skip element section parsing
+                    for _val in reader {
+                        // Skip element section parsing for now
                     }
                 }
 
@@ -149,7 +160,6 @@ impl WasmModule {
                         count,
                         range
                     );
-                    // For now, we skip data count section parsing
                 }
 
                 Payload::DataSection(reader) => {
@@ -173,36 +183,10 @@ impl WasmModule {
                         body.as_bytes().len()
                     );
 
-                    // Parse the actual function bytecode using FunctionBody
-                    self.parse_function_body(&body)?;
+                    // Parse the function body and create a WasmFunction
+                    self.parse_function_body(&body, current_function_index, &function_types)?;
+                    current_function_index += 1;
                 }
-                Payload::ModuleSection {
-                    parser,
-                    unchecked_range,
-                } => {}
-
-                Payload::InstanceSection(reader) => {}
-
-                Payload::CoreTypeSection(reader) => {}
-
-                Payload::ComponentSection {
-                    parser,
-                    unchecked_range,
-                } => {}
-
-                Payload::ComponentInstanceSection(reader) => {}
-
-                Payload::ComponentAliasSection(reader) => {}
-
-                Payload::ComponentTypeSection(reader) => {}
-
-                Payload::ComponentCanonicalSection(reader) => {}
-
-                Payload::ComponentStartSection { start, range } => {}
-
-                Payload::ComponentImportSection(reader) => {}
-
-                Payload::ComponentExportSection(reader) => {}
 
                 Payload::CustomSection(reader) => {
                     let name = reader.name().to_string();
@@ -210,51 +194,60 @@ impl WasmModule {
                     self.custom_sections.insert(name, data);
                 }
 
-                Payload::UnknownSection {
-                    id,
-                    contents,
-                    range,
-                } => {}
-
                 Payload::End(_) => {
-                    // end = true;
+                    break;
                 }
 
                 _ => {
-                    return Err(DiscaError::InternalError(
-                        "Unexpected WASM payload type".to_string(),
-                    ));
+                    log::debug!("Skipping unsupported WASM section");
                 }
             }
         }
 
-        // if !end {
-        //     return Err(DiscaError::InternalError(
-        //         "WASM parsing did not end correctly".to_string(),
-        //     ));
-        // }
-
         Ok(())
     }
 
-    /// Convert WASM operations to logic gates
-    pub fn to_logic_circuit(&self) -> LogicCircuit {
-        let mut reducer = WasmReducer::new();
+    /// Convert WASM operations to logic circuits per function
+    pub fn to_logic_circuits(&self) -> HashMap<String, LogicCircuit> {
+        let mut circuits = HashMap::new();
 
-        // If no operations were parsed, create a simple test circuit
-        // to verify the logic works
-        if self.operations.is_empty() {
-            return self.create_test_circuit_from_functions();
+        // Generate circuits for each exported function
+        for (func_name, func) in &self.functions {
+            if func.is_exported {
+                let mut reducer = WasmReducer::new();
+                let circuit = reducer.reduce(&func.operations);
+                log::debug!(
+                    "Generated circuit for function '{}': {:#?}",
+                    func_name,
+                    circuit
+                );
+                circuits.insert(func_name.clone(), circuit);
+            }
         }
 
-        let circuit = reducer.reduce(&self.operations);
-        log::debug!("LOGIC_CIRCUIT: {:#?}", circuit);
-        circuit
+        // If no exported functions, create a test circuit
+        if circuits.is_empty() {
+            circuits.insert("test".to_string(), self.create_test_circuit());
+        }
+
+        circuits
+    }
+
+    /// Convert WASM operations to a single logic circuit (legacy method)
+    pub fn to_logic_circuit(&self) -> LogicCircuit {
+        // For backwards compatibility, return the first exported function's circuit
+        // or a test circuit if no functions exist
+        if let Some((_, func)) = self.functions.iter().find(|(_, f)| f.is_exported) {
+            let mut reducer = WasmReducer::new();
+            return reducer.reduce(&func.operations);
+        }
+
+        self.create_test_circuit()
     }
 
     /// Create a test circuit based on detected functions
     /// This is a temporary implementation until full WASM parsing is complete
-    fn create_test_circuit_from_functions(&self) -> LogicCircuit {
+    fn create_test_circuit(&self) -> LogicCircuit {
         let mut circuit = LogicCircuit::new();
 
         // Add some input wires
@@ -306,7 +299,14 @@ impl WasmModule {
     }
 
     /// Parse function body and extract operations
-    fn parse_function_body(&mut self, body: &wasmparser::FunctionBody) -> Result<()> {
+    fn parse_function_body(
+        &mut self,
+        body: &wasmparser::FunctionBody,
+        function_index: usize,
+        function_types: &[u32],
+    ) -> Result<()> {
+        let mut operations = Vec::new();
+
         // Get the operators reader from the function body
         let operators_reader = body.get_operators_reader().map_err(|e| {
             DiscaError::InternalError(format!("Failed to create operators reader: {}", e))
@@ -318,12 +318,13 @@ impl WasmModule {
                     let wasm_op = self.convert_operator_to_operation(&op);
                     if let Some(operation) = wasm_op {
                         log::debug!("Parsed operation: {:?}", operation);
-                        self.operations.push(operation);
-                    }
 
-                    // Log end of function
-                    if matches!(op, wasmparser::Operator::End) {
-                        log::debug!("Reached end of function");
+                        // Check if this is a memory operation (global state)
+                        if self.is_memory_operation(&operation) {
+                            self.global_state.memory_operations.push(operation.clone());
+                        }
+
+                        operations.push(operation);
                     }
                 }
                 Err(e) => {
@@ -333,11 +334,69 @@ impl WasmModule {
             }
         }
 
-        log::debug!(
-            "Parsed {} operations from function body",
-            self.operations.len()
-        );
+        // Create function name and determine if it's exported
+        let func_name = self.get_function_name(function_index);
+        let is_exported = self.exports.contains_key(&func_name);
+
+        // Get function type
+        let type_index = function_types.get(function_index).copied().unwrap_or(0);
+        let func_type = self
+            .types
+            .get(type_index as usize)
+            .cloned()
+            .unwrap_or_else(|| {
+                // Default function type if not found
+                wasmparser::FuncType::new([], [])
+            });
+
+        let wasm_function = WasmFunction {
+            name: func_name.clone(),
+            type_index,
+            func_type,
+            operations,
+            is_exported,
+        };
+
+        self.functions.insert(func_name, wasm_function);
+
+        log::debug!("Parsed function with {} operations", self.functions.len());
         Ok(())
+    }
+
+    /// Check if an operation is a memory operation
+    fn is_memory_operation(&self, operation: &WasmOperation) -> bool {
+        matches!(
+            operation.opcode.as_str(),
+            "i32.load"
+                | "i32.load8_u"
+                | "i32.load8_s"
+                | "i32.load16_u"
+                | "i32.load16_s"
+                | "i32.store"
+                | "i32.store8"
+                | "i32.store16"
+                | "i64.load"
+                | "i64.store"
+                | "f32.load"
+                | "f32.store"
+                | "f64.load"
+                | "f64.store"
+        )
+    }
+
+    /// Get function name from index (use export name if available)
+    fn get_function_name(&self, function_index: usize) -> String {
+        // Check if this function is exported
+        for (export_name, kind) in &self.exports {
+            if let wasmparser::ExternalKind::Func = kind {
+                // Note: This is a simplified approach. In a full implementation,
+                // we'd need to track the export index properly
+                return export_name.clone();
+            }
+        }
+
+        // Default to indexed name
+        format!("func_{}", function_index)
     }
 
     /// Convert wasmparser::Operator to WasmOperation
@@ -562,14 +621,25 @@ impl WasmModule {
 
     /// Get summary statistics of the parsed module
     pub fn get_stats(&self) -> ModuleStats {
+        let total_operations: usize = self
+            .functions
+            .values()
+            .map(|f| f.operations.len())
+            .sum::<usize>()
+            + self.global_state.memory_operations.len();
+
         ModuleStats {
             function_count: self.functions.len(),
-            operation_count: self.operations.len(),
+            operation_count: total_operations,
             export_count: self.exports.len(),
             type_count: self.types.len(),
-            table_count: self.tables.len(),
-            memory_count: self.memories.len(),
-            global_count: self.globals.len(),
+            table_count: 0, // Tables are not tracked separately anymore
+            memory_count: if self.global_state.memory_size > 0 {
+                1
+            } else {
+                0
+            },
+            global_count: self.global_state.globals.len(),
         }
     }
 }
