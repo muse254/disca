@@ -29,38 +29,34 @@ pub struct GlobalState {
     pub memory_operations: Vec<WasmOperation>,
 }
 
-#[derive(Debug)]
-pub struct WasmModule {
+impl Default for GlobalState {
+    fn default() -> Self {
+        Self {
+            memory_size: 0,
+            globals: Vec::new(),
+            memory_operations: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct WasmModule<'a> {
     pub functions: HashMap<String, WasmFunction>,
     pub global_state: GlobalState,
-    pub exports: HashMap<String, wasmparser::ExternalKind>,
+    pub exports: Vec<wasmparser::Export<'a>>,
     pub types: Vec<wasmparser::FuncType>,
     pub custom_sections: HashMap<String, Vec<u8>>,
 }
 
 pub fn parse_wasm_module(wasm_bytes: &[u8]) -> Result<HashMap<String, LogicCircuit>> {
-    let mut module = WasmModule::new();
-    module.parse(wasm_bytes)?;
+    let module = WasmModule::new(wasm_bytes)?;
     Ok(module.to_logic_circuits())
 }
 
-impl WasmModule {
-    pub fn new() -> Self {
-        Self {
-            functions: HashMap::new(),
-            global_state: GlobalState {
-                memory_size: 0,
-                globals: Vec::new(),
-                memory_operations: Vec::new(),
-            },
-            exports: HashMap::new(),
-            types: Vec::new(),
-            custom_sections: HashMap::new(),
-        }
-    }
-
+impl<'a> WasmModule<'a> {
     /// Parse WASM bytes into this module
-    pub fn parse(&mut self, wasm_bytes: &[u8]) -> Result<()> {
+    pub fn new(wasm_bytes: &'a [u8]) -> Result<Self> {
+        let mut module = Self::default();
         let mut function_types: Vec<u32> = Vec::new(); // Store function type indices
         let mut current_function_index = 0;
 
@@ -79,7 +75,7 @@ impl WasmModule {
                                 ..
                             } = sub_type.composite_type
                             {
-                                self.types.push(func_type.clone());
+                                module.types.push(func_type.clone());
                                 log::debug!(
                                     "Extracted FuncType: params={:?}, results={:?}",
                                     func_type.params(),
@@ -115,7 +111,7 @@ impl WasmModule {
                     for memory in reader {
                         log::debug!("Payload::MemorySection: {:#?}", memory);
                         let memory = memory?;
-                        self.global_state.memory_size = memory.initial as u32;
+                        module.global_state.memory_size = memory.initial as u32;
                     }
                 }
 
@@ -126,7 +122,7 @@ impl WasmModule {
                 Payload::GlobalSection(reader) => {
                     for global in reader {
                         log::debug!("Payload::GlobalSection: {:#?}", global);
-                        self.global_state.globals.push(global?.ty);
+                        module.global_state.globals.push(global?.ty);
                     }
                 }
 
@@ -134,7 +130,7 @@ impl WasmModule {
                     for export in reader {
                         let export = export?;
                         log::debug!("Payload::ExportSection: {:#?}", export);
-                        self.exports.insert(export.name.to_string(), export.kind);
+                        module.exports.push(export);
 
                         // Mark functions as exported
                         if let wasmparser::ExternalKind::Func = export.kind {
@@ -184,15 +180,39 @@ impl WasmModule {
                     );
 
                     // Parse the function body and create a WasmFunction
-                    self.parse_function_body(&body, current_function_index, &function_types)?;
+                    module.parse_function_body(&body, current_function_index, &function_types)?;
                     current_function_index += 1;
                 }
+
+                Payload::ModuleSection { .. } => {}
+
+                Payload::InstanceSection(..) => {}
+
+                Payload::CoreTypeSection(..) => {}
+
+                Payload::ComponentSection { .. } => {}
+
+                Payload::ComponentInstanceSection(..) => {}
+
+                Payload::ComponentAliasSection(..) => {}
+
+                Payload::ComponentTypeSection(..) => {}
+
+                Payload::ComponentCanonicalSection(..) => {}
+
+                Payload::ComponentStartSection { .. } => {}
+
+                Payload::ComponentImportSection(..) => {}
+
+                Payload::ComponentExportSection(..) => {}
 
                 Payload::CustomSection(reader) => {
                     let name = reader.name().to_string();
                     let data = reader.data().to_vec();
-                    self.custom_sections.insert(name, data);
+                    module.custom_sections.insert(name, data);
                 }
+
+                Payload::UnknownSection { .. } => {}
 
                 Payload::End(_) => {
                     break;
@@ -204,7 +224,7 @@ impl WasmModule {
             }
         }
 
-        Ok(())
+        Ok(module)
     }
 
     /// Convert WASM operations to logic circuits per function
@@ -336,7 +356,18 @@ impl WasmModule {
 
         // Create function name and determine if it's exported
         let func_name = self.get_function_name(function_index);
-        let is_exported = self.exports.contains_key(&func_name);
+        log::warn!("Function name: {} at index {}", func_name, function_index);
+
+        let mut is_exported = false;
+        for exported in &self.exports {
+            if let wasmparser::ExternalKind::Func = exported.kind {
+                if exported.name == func_name {
+                    log::debug!("Function '{}' is exported", func_name);
+                    is_exported = true;
+                    break;
+                }
+            }
+        }
 
         // Get function type
         let type_index = function_types.get(function_index).copied().unwrap_or(0);
@@ -387,11 +418,11 @@ impl WasmModule {
     /// Get function name from index (use export name if available)
     fn get_function_name(&self, function_index: usize) -> String {
         // Check if this function is exported
-        for (export_name, kind) in &self.exports {
-            if let wasmparser::ExternalKind::Func = kind {
-                // Note: This is a simplified approach. In a full implementation,
-                // we'd need to track the export index properly
-                return export_name.clone();
+        for exported in &self.exports {
+            if let wasmparser::ExternalKind::Func = exported.kind {
+                if exported.index == function_index as u32 {
+                    return exported.name.to_string();
+                }
             }
         }
 

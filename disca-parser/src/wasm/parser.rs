@@ -3,7 +3,7 @@
 use crate::errors::{DiscaError, Result};
 use crate::homomorphic::{BinaryCircuit, LogicCircuit};
 use crate::optimizer::{CircuitOptimizer, OptimizationLevel};
-use crate::wasm_module::WasmModule;
+use crate::wasm::wasm_module::WasmModule;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -90,9 +90,8 @@ impl WasmParser {
     }
 
     /// Parse raw WASM module (internal implementation)
-    fn parse_wasm_module(&self, wasm_bytes: &[u8]) -> Result<WasmModule> {
-        let mut module = WasmModule::new();
-        module.parse(wasm_bytes)?;
+    fn parse_wasm_module<'a>(&self, wasm_bytes: &'a [u8]) -> Result<WasmModule<'a>> {
+        let module = WasmModule::new(wasm_bytes)?;
         log::debug!("WASM_MODULE: {:#?}", module);
         Ok(module)
     }
