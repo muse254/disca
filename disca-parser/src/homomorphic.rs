@@ -23,19 +23,18 @@ pub struct BinaryLogicGate {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateOpcode {
-    Add = 0x00,      // 0000
-    Multiply = 0x01, // 0001
-    Subtract = 0x02, // 0002
-    Constant = 0x03, // 0003
-    Load = 0x04,     // 0004
-    Store = 0x05,    // 0005
-    Equal = 0x06,    // 0006
-    LessThan = 0x07, // 0007
-    And = 0x08,      // 0008
-    Or = 0x09,       // 0009
-    Xor = 0x0A,      // 000A
-    Not = 0x0B,      // 000B
-                     // Reserved for future operations: 0x0C - 0x0F
+    Add = 0,
+    Multiply = 1,
+    Subtract = 2,
+    Constant = 3,
+    Load = 4,
+    Store = 5,
+    Equal = 6,
+    LessThan = 7,
+    And = 8,
+    Or = 9,
+    Xor = 10,
+    Not = 11,
 }
 
 /// Legacy string-based logic gate representation
