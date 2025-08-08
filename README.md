@@ -1,6 +1,6 @@
 # DISCA - Discrete Compute Automata
 
-Privacy-preserving computation using WebAssembly-to-FHE conversion and blockchain-based privacy pools.
+Privacy-preserving computation using WebAssembly-to-FHE conversion for data privacy and multiparty compute for functional privacy.
 
 ## Overview
 

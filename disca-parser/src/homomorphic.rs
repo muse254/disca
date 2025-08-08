@@ -1,5 +1,7 @@
 use crate::WasmOperation;
-use serde::{Deserialize, Serialize};
+use clap::ValueEnum;
+use serde::{de, Deserialize, Serialize};
+use wasmparser::ValType;
 
 /// Wire identifier for circuit connections
 pub type WireId = u32;
@@ -54,7 +56,7 @@ pub enum LogicGate {
     },
     /// Subtraction gate
     Subtract {
-        input_a: String,
+        input_a: ValType,
         input_b: String,
         output: String,
     },
@@ -939,6 +941,24 @@ impl WasmReducer {
                         input_b: b,
                         output: output.clone(),
                     });
+
+                    // test ideas
+                    {
+                        let depth_a =
+                            circuit.gates.iter().filter(|g| g.input_a == a).count() as u32;
+
+                        let depth_b =
+                            circuit.gates.iter().filter(|g| g.input_b == b).count() as u32;
+
+                        let new_depth = depth_a.max(depth_b);
+                        if depths.get(output).map_or(true, |&d| d < new_depth) {
+                            depths.insert(output.clone(), new_depth);
+                            changed = true;
+                        }
+
+                        
+                    }
+
                     self.stack.push(output);
                 }
             }
@@ -992,10 +1012,7 @@ impl WasmReducer {
                 }
             }
 
-            _ => {
-                // For unsupported operations, we'll create a placeholder
-                // In a real implementation, you might want to handle more operations
-            }
+            _ => {}
         }
     }
 }

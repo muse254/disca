@@ -2,9 +2,8 @@
 
 use crate::errors::{DiscaError, Result};
 use crate::homomorphic::{BinaryCircuit, LogicCircuit};
-use crate::optimizer::{CircuitOptimizer, OptimizationLevel};
+use crate::optimizer::OptimizationLevel;
 use crate::wasm::wasm_module::WasmModule;
-use clap::builder::Str;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
