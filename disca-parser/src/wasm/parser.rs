@@ -2,9 +2,10 @@
 
 use crate::errors::{DiscaError, Result};
 use crate::homomorphic::{BinaryCircuit, LogicCircuit};
-use crate::optimizer::{CircuitOptimizer, OptimizationLevel};
+use crate::optimizer::OptimizationLevel;
 use crate::wasm::wasm_module::WasmModule;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Output format options for circuit export
@@ -52,35 +53,43 @@ impl WasmParser {
     }
 
     /// Parse WASM bytes and return a legacy logic circuit
-    pub fn parse_to_logic_circuit(&self, wasm_bytes: &[u8]) -> Result<LogicCircuit> {
+    pub fn parse_to_logic_circuits(
+        &self,
+        wasm_bytes: &[u8],
+    ) -> Result<HashMap<String, LogicCircuit>> {
         let module = self.parse_wasm_module(wasm_bytes)?;
-        let mut circuit = module.to_logic_circuit();
-
-        // Apply optimization if requested
-        if self.optimization_level != OptimizationLevel::None {
-            let optimizer = CircuitOptimizer::new(self.optimization_level);
-            circuit = optimizer.optimize(circuit)?;
-        }
-
-        Ok(circuit)
+        Ok(module.to_logic_circuits())
     }
 
     /// Parse WASM bytes and return an optimized binary circuit
-    pub fn parse_to_binary_circuit(&self, wasm_bytes: &[u8]) -> Result<BinaryCircuit> {
-        let logic_circuit = self.parse_to_logic_circuit(wasm_bytes)?;
-        BinaryCircuit::from_logic_circuit(&logic_circuit)
+    pub fn parse_to_binary_circuits(
+        &self,
+        wasm_bytes: &[u8],
+    ) -> Result<HashMap<String, BinaryCircuit>> {
+        let logic_circuit = self.parse_to_logic_circuits(wasm_bytes)?;
+
+        let mut circuits = HashMap::new();
+        for (name, logic_circuit) in logic_circuit {
+            let binary_circuit = BinaryCircuit::from_logic_circuit(&logic_circuit)?;
+            circuits.insert(name, binary_circuit);
+        }
+
+        Ok(circuits)
     }
 
     /// Parse WASM file from path
-    pub fn parse_file<P: AsRef<Path>>(&self, path: P) -> Result<LogicCircuit> {
+    pub fn parse_file<P: AsRef<Path>>(&self, path: P) -> Result<HashMap<String, LogicCircuit>> {
         let wasm_bytes = std::fs::read(path)?;
-        self.parse_to_logic_circuit(&wasm_bytes)
+        self.parse_to_logic_circuits(&wasm_bytes)
     }
 
     /// Parse WASM file to binary circuit
-    pub fn parse_file_to_binary<P: AsRef<Path>>(&self, path: P) -> Result<BinaryCircuit> {
+    pub fn parse_file_to_binary<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<HashMap<String, BinaryCircuit>> {
         let wasm_bytes = std::fs::read(path)?;
-        self.parse_to_binary_circuit(&wasm_bytes)
+        self.parse_to_binary_circuits(&wasm_bytes)
     }
 
     /// Get optimization statistics for the last parsed circuit
@@ -95,6 +104,18 @@ impl WasmParser {
         log::debug!("WASM_MODULE: {:#?}", module);
         Ok(module)
     }
+}
+
+#[test]
+fn testing_thing() {
+    let wasm_bytes = include_bytes!("../../wasm_program/wasm_program.wasm");
+
+    let wasm_parser = WasmParser::new();
+    let circuit = wasm_parser
+        .parse_to_logic_circuits(wasm_bytes)
+        .expect("Failed to parse WASM bytes");
+
+    log::warn!("Circuit: {:#?}", circuit);
 }
 
 /// Utility functions for circuit analysis and conversion

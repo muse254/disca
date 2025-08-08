@@ -35,12 +35,12 @@ pub use crate::homomorphic::{
 };
 pub use crate::optimizer::{CircuitAnalyzer, CircuitOptimizer, OptimizationLevel};
 pub use crate::wasm::parser::{utils, OutputFormat, WasmParser};
-pub use crate::wasm::wasm_module::{WasmModule, WasmOperation};
+pub use crate::wasm::wasm_module::{WasmFunction, WasmModule, WasmOperation};
 
 mod errors;
 mod homomorphic;
 mod optimizer;
-mod wasm;
+pub(crate) mod wasm;
 
 /// Re-export commonly used types
 pub mod prelude {

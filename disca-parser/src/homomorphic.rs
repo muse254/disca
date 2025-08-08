@@ -1,5 +1,7 @@
 use crate::WasmOperation;
-use serde::{Deserialize, Serialize};
+use clap::ValueEnum;
+use serde::{de, Deserialize, Serialize};
+use wasmparser::ValType;
 
 /// Wire identifier for circuit connections
 pub type WireId = u32;
@@ -23,19 +25,18 @@ pub struct BinaryLogicGate {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateOpcode {
-    Add = 0x00,      // 0000
-    Multiply = 0x01, // 0001
-    Subtract = 0x02, // 0002
-    Constant = 0x03, // 0003
-    Load = 0x04,     // 0004
-    Store = 0x05,    // 0005
-    Equal = 0x06,    // 0006
-    LessThan = 0x07, // 0007
-    And = 0x08,      // 0008
-    Or = 0x09,       // 0009
-    Xor = 0x0A,      // 000A
-    Not = 0x0B,      // 000B
-                     // Reserved for future operations: 0x0C - 0x0F
+    Add = 0,
+    Multiply = 1,
+    Subtract = 2,
+    Constant = 3,
+    Load = 4,
+    Store = 5,
+    Equal = 6,
+    LessThan = 7,
+    And = 8,
+    Or = 9,
+    Xor = 10,
+    Not = 11,
 }
 
 /// Legacy string-based logic gate representation
@@ -55,7 +56,7 @@ pub enum LogicGate {
     },
     /// Subtraction gate
     Subtract {
-        input_a: String,
+        input_a: ValType,
         input_b: String,
         output: String,
     },
@@ -940,6 +941,24 @@ impl WasmReducer {
                         input_b: b,
                         output: output.clone(),
                     });
+
+                    // test ideas
+                    {
+                        let depth_a =
+                            circuit.gates.iter().filter(|g| g.input_a == a).count() as u32;
+
+                        let depth_b =
+                            circuit.gates.iter().filter(|g| g.input_b == b).count() as u32;
+
+                        let new_depth = depth_a.max(depth_b);
+                        if depths.get(output).map_or(true, |&d| d < new_depth) {
+                            depths.insert(output.clone(), new_depth);
+                            changed = true;
+                        }
+
+                        
+                    }
+
                     self.stack.push(output);
                 }
             }
@@ -993,10 +1012,7 @@ impl WasmReducer {
                 }
             }
 
-            _ => {
-                // For unsupported operations, we'll create a placeholder
-                // In a real implementation, you might want to handle more operations
-            }
+            _ => {}
         }
     }
 }

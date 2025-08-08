@@ -41,7 +41,7 @@ impl Default for GlobalState {
 
 #[derive(Debug, Default)]
 pub struct WasmModule<'a> {
-    pub functions: HashMap<String, WasmFunction>,
+    pub functions: Vec<WasmFunction>,
     pub global_state: GlobalState,
     pub exports: Vec<wasmparser::Export<'a>>,
     pub types: Vec<wasmparser::FuncType>,
@@ -232,16 +232,16 @@ impl<'a> WasmModule<'a> {
         let mut circuits = HashMap::new();
 
         // Generate circuits for each exported function
-        for (func_name, func) in &self.functions {
+        for func in &self.functions {
             if func.is_exported {
                 let mut reducer = WasmReducer::new();
                 let circuit = reducer.reduce(&func.operations);
                 log::debug!(
                     "Generated circuit for function '{}': {:#?}",
-                    func_name,
+                    func.name,
                     circuit
                 );
-                circuits.insert(func_name.clone(), circuit);
+                circuits.insert(func.name.clone(), circuit);
             }
         }
 
@@ -251,18 +251,6 @@ impl<'a> WasmModule<'a> {
         }
 
         circuits
-    }
-
-    /// Convert WASM operations to a single logic circuit (legacy method)
-    pub fn to_logic_circuit(&self) -> LogicCircuit {
-        // For backwards compatibility, return the first exported function's circuit
-        // or a test circuit if no functions exist
-        if let Some((_, func)) = self.functions.iter().find(|(_, f)| f.is_exported) {
-            let mut reducer = WasmReducer::new();
-            return reducer.reduce(&func.operations);
-        }
-
-        self.create_test_circuit()
     }
 
     /// Create a test circuit based on detected functions
@@ -388,8 +376,7 @@ impl<'a> WasmModule<'a> {
             is_exported,
         };
 
-        self.functions.insert(func_name, wasm_function);
-
+        self.functions.push(wasm_function);
         log::debug!("Parsed function with {} operations", self.functions.len());
         Ok(())
     }
@@ -654,7 +641,7 @@ impl<'a> WasmModule<'a> {
     pub fn get_stats(&self) -> ModuleStats {
         let total_operations: usize = self
             .functions
-            .values()
+            .iter()
             .map(|f| f.operations.len())
             .sum::<usize>()
             + self.global_state.memory_operations.len();

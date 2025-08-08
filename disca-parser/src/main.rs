@@ -94,46 +94,46 @@ fn main() -> anyhow::Result<()> {
             binary,
             stats,
         } => {
-            let optimization_level = optimization
-                .parse()
-                .map_err(|e: DiscaError| anyhow::anyhow!("Invalid optimization level: {}", e))?;
+            // let optimization_level = optimization
+            //     .parse()
+            //     .map_err(|e: DiscaError| anyhow::anyhow!("Invalid optimization level: {}", e))?;
 
-            let parser = WasmParser::with_optimization(optimization_level);
+            // let parser = WasmParser::with_optimization(optimization_level);
 
-            let result = if binary {
-                let circuit = parser.parse_file_to_binary(&input)?;
-                match format {
-                    OutputFormat::Json => circuit.to_json()?,
-                    OutputFormat::Binary => format!("{:?}", circuit.to_storage_bytes()),
-                    OutputFormat::Text => format!("{:#?}", circuit),
-                }
-            } else {
-                let circuit = parser.parse_file(&input)?;
-                disca_parser::utils::convert_format(&circuit, format)?
-            };
+            // let result = if binary {
+            //     let circuit = parser.parse_file_to_binary(&input)?;
+            //     match format {
+            //         OutputFormat::Json => circuit.to_json()?,
+            //         OutputFormat::Binary => format!("{:?}", circuit.to_storage_bytes()),
+            //         OutputFormat::Text => format!("{:#?}", circuit),
+            //     }
+            // } else {
+            //     let circuit = parser.parse_file(&input)?;
+            //     disca_parser::utils::convert_format(&circuit, format)?
+            // };
 
-            if let Some(output_path) = output {
-                fs::write(output_path, result)?;
-            } else {
-                println!("{}", result);
-            }
+            // if let Some(output_path) = output {
+            //     fs::write(output_path, result)?;
+            // } else {
+            //     println!("{}", result);
+            // }
 
-            if stats {
-                let circuit = parser.parse_file(&input)?;
-                println!("\n{}", disca_parser::utils::analyze_circuit(&circuit));
-            }
+            // if stats {
+            //     let circuit = parser.parse_file(&input)?;
+            //     println!("\n{}", disca_parser::utils::analyze_circuit(&circuit));
+            // }
         }
 
         Commands::Analyze { input, detailed } => {
-            let parser = WasmParser::new();
-            let circuit = parser.parse_file(&input)?;
+            // let parser = WasmParser::new();
+            // let circuit = parser.parse_file(&input)?;
 
-            println!("{}", disca_parser::utils::analyze_circuit(&circuit));
+            // println!("{}", disca_parser::utils::analyze_circuit(&circuit));
 
-            if detailed {
-                // TODO: Add more detailed analysis
-                println!("\nDetailed analysis not yet implemented");
-            }
+            // if detailed {
+            //     // TODO: Add more detailed analysis
+            //     println!("\nDetailed analysis not yet implemented");
+            // }
         }
 
         Commands::Validate { input, format } => match format {
