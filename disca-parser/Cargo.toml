@@ -25,3 +25,6 @@ clap = { version = "4", features = ["derive", "cargo"] }
 anyhow = "1"
 thiserror = "2"
 log = "0.4.27"
+
+[dev-dependencies]
+env_logger = "0.11.8"

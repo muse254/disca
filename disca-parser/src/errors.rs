@@ -8,6 +8,9 @@ pub type Result<T> = std::result::Result<T, DiscaError>;
 /// Main error type for DISCA parser operations
 #[derive(Error, Debug)]
 pub enum DiscaError {
+    #[error("Internal error: {0}")]
+    InternalError(String),
+
     /// WASM parsing errors
     #[error("WASM parsing error: {0}")]
     WasmParsing(#[from] wasmparser::BinaryReaderError),
