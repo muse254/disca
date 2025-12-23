@@ -7,44 +7,75 @@
 
 \geometry{margin=1in}
 
-\title{Distributed Compute Automata: A Standard for Logic and Data Privacy for Computations }
+\title{Distributed Compute Automata: A Standard for Logic and Data Privacy for Computations}
 \author{Osoro Bironga, fanosoro@gmail.com}
 \date{\today}
+
+\makeatletter
+\renewcommand{\@maketitle}{%
+  \newpage
+  \null
+  \vskip 2em%
+  \begin{center}%
+  \let \footnote \thanks
+    {\LARGE \bfseries \@title \par}%
+    \vskip 1.5em%
+    {\large
+      \lineskip .5em%
+      \begin{tabular}[t]{c}%
+        \@author
+      \end{tabular}\par}%
+    \vskip 1em%
+    {\large \@date}%
+  \end{center}%
+  \par
+  \vskip 1.5em}
+\makeatother
 
 \begin{document}
 
 \maketitle
 
+\begin{abstract}
+\centering
+\begin{minipage}{0.8\textwidth}
+\centering
+\textbf{Distributed Compute Automata} (DISCA) is a framework that enables experimentation and exploration of privacy-preserving computation approaches.
+Privacy-preserving computation aims to protect the privacy of data and the computation itself. This means we don't know what the data is or what the computation is doing. 
+
+This is a very useful abstraction that can be applied to a scenario like running a proprietary algorithm in the open web without exposing the algorithm and without users exposing their data to you.
+
+In this work, we outline DISCA as a standard for logic and data privacy for computations.
+The framework's design is proposed and we analyze in detail the performance and security from a simple prototype built on Ethereum, leveraging its blockchain properties and guarantees.
+Lastly, we create a formal verification proof for the framework.
+\end{minipage}
+\end{abstract}
+
+\noindent\textit{Note: Throughout this document, we use DISCA as the abbreviation for Distributed Compute Automata.}
+
 \section{Introduction}
 
-Distributed Compute Automata is a framework that enables experimentation and exploration of privacy-preserving computation approaches. The framework aims to create infrastructure for logic and privacy computations through the use of both software approaches and hardware approaches. The infrastructure comes with no batteries included and these sections
-can be as opinionated as needed. We aim to support Fully Homomorphic Encryption (FHE) and other cryptographic operations in case there is a better solution to the problem or half-solutions. If you want to run your network with a software approach utilizing these cryptographic primitives, then these implementations can be
-provided. If you go the route of using TEEs then the infrastructure supports this.
+The framework is a technology stack that allows for both software and hardware approaches to the problem of privacy-preserving computation.
 
-The framework provides a unified approach that allows developers to leverage both software and hardware-based solutions without completely rewriting the core application. This flexibility is crucial given the diverse landscape of privacy-preserving computation technologies, each with their own strengths and limitations.
+\subsection{Motivation}
 
-Privacy-preserving computation fundamentally addresses two critical security properties: confidentiality and integrity. By confidentiality, information is not made available to unauthorized parties, and by integrity, information is not modified or tampered with. These properties form the foundation upon which Distributed Compute Automata builds its infrastructure.
+There is active work and research in the field of privacy-preserving computation (TODO: ADD REFERENCES).
+This proposal provides a much-needed playground for experimentation and exploration, a standard that would unify the approaches and provide a common interface for the development of privacy-preserving computation applications.
+This flexibility is crucial given the diverse landscape of privacy-preserving computation technologies, each with their own strengths and limitations.
 
-The common denominator with all implementations will be that there is only a single VM that will run on the user-space nodes. Since TEEs often function like bare-metal VMs, it's essential to have a lightweight, portable runtime. This is where WebAssembly (Wasm) comes in---its efficiency and flexibility make it the perfect solution for building secure, high-performance environments. Running a node should be as simple 
-as running a browser extension or running a desktop or mobile application.
+The reason why the framework does not just use one of the approaches is because there are trade-offs between the approaches.
+For example, Homomorphic Encryption is a very powerful tool but it is computationally expensive.
+TEEs are more efficient but they are more complex to implement and they are more expensive to deploy.
 
-\subsection{Privacy-Preserving Computation Approaches}
+\subsection{Preliminaries}
 
-The Distributed Compute Automata standard supports multiple approaches to privacy-preserving computation, each with distinct characteristics and trade-offs. Two primary approaches are considered: software-based solutions utilizing Homomorphic Encryption (HE) and hardware-based solutions leveraging Trusted Execution Environments (TEEs).
+Privacy-preserving methods through software are achieved through cryptography.
+More specifically with privacy-preserving computation we have Homomorphic Encryption (HE) and Fully Homomorphic Encryption (FHE).
+There are also cryptographic hybrid solutions that combine multiple techniques, such as Homomorphic Encryption (HE), Secure Multi-Party Computation (SMPC), and Zero-Knowledge Proofs (ZKPs), to achieve privacy-preserving computation.
 
-\subsubsection{Homomorphic Encryption}
-
-Homomorphic Encryption~\cite{homomorphic_encryption} enables computations to be performed directly on encrypted data without requiring decryption, providing strong privacy guarantees. This approach allows for secure data processing in untrusted environments, making it particularly valuable for scenarios where data confidentiality is paramount. The framework aims to support Fully Homomorphic Encryption (FHE) and other cryptographic operations, recognizing that there may be better solutions or half-solutions to specific privacy-preserving computation problems. This flexibility allows the framework to adapt as new cryptographic primitives and optimizations emerge from ongoing research.
-
-However, Homomorphic Encryption faces significant scalability challenges for normal applications and algorithms. The computational overhead of homomorphic operations can be orders of magnitude slower than equivalent operations on plaintext data, making it impractical for many real-time or large-scale applications. Additionally, the complexity of implementing homomorphic encryption schemes requires deep cryptographic expertise, and the storage requirements for encrypted data can be substantial, further limiting its applicability to general-purpose computing scenarios.
-
-Nevertheless, there are scenarios where speed is a non-issue for compute, making Homomorphic Encryption a viable solution. For example, processing medical records to provide a diagnosis where a time complexity of a few days is acceptable represents a valid use case where the strong privacy guarantees of homomorphic encryption outweigh the performance overhead. In such applications, the ability to perform computations on encrypted data without exposing sensitive information can be more valuable than computational speed, demonstrating that there are still practical applications for this technology.
-
-Despite these challenges, Homomorphic Encryption remains an area of active development and research. There are still many brilliant individuals in both academic and cryptographic circles who continue to push the envelope of what's possible, developing new schemes and optimizations that address existing limitations and expand the practical applications of homomorphic encryption.
-
-\subsubsection{Trusted Execution Environments}
-
-Trusted Execution Environments (TEEs)~\cite{tee_reference} provide hardware-based isolation for secure computation, creating protected enclaves where code and data can execute securely even in the presence of potentially compromised operating systems. TEEs offer better performance characteristics compared to pure software-based encryption approaches, making them more suitable for practical applications. However, TEEs are not without limitations. Recent developments have highlighted fundamental challenges with TEE implementations, including vulnerabilities to side-channel attacks, performance overhead from security checks, and concerns about long-term viability~\cite{integritee_tee_limitations}. The complexity of implementation and integration, coupled with evolving threat models, presents ongoing challenges for TEE-based solutions.
+On the other side of the coin, we have Trusted Execution Environments (TEEs).
+TEEs are hardware-based solutions that provide a secure enclave where code and data can execute securely even in the presence of potentially compromised operating systems.
+TEEs offer better performance characteristics compared to pure software-based encryption approaches, making them more suitable for practical applications.
 
 \section{References}
 
