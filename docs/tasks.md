@@ -111,8 +111,12 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
 
 ## Track 4 — Demo + submission — needs 1.1
 
-- [ ] **4.1 Write the tally circuit** in Rust, compile to WASM, confirm it
-      parses into `CircuitOp`s and fits the release-mode latency budget from 0.2.
+- [x] **4.1 Write the tally circuit** — done as a validation spike.
+      `committee-tally/` holds four ways of writing the tally; all parse, and
+      `primitives/tests/tally_circuit.rs` evaluates them under real encryption.
+      Findings are in architecture.md §2a: release builds are required (debug
+      output is rejected), and fixed-size loops unroll cleanly.
+      `primitives/examples/inspect.rs` dumps a module's lowered opcodes.
 - [ ] **4.2 `CommitteeTally.sol`** consumer contract (bridge.md §5).
 - [ ] **4.3 `disca-cli` for real** — `parse` is a no-op (`main.rs:29`) and
       `parser.rs:3` is `todo!()`. Needs at minimum: wasm → bytecode + hash, and
