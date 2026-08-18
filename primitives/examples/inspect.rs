@@ -8,8 +8,8 @@
 //! cargo run -p primitives --example inspect -- path/to/module.wasm
 //! ```
 
-use primitives::bytecode;
 use primitives::program::{DiscaProgram, Program};
+use primitives::{bytecode, validate};
 
 fn main() {
     let Some(path) = std::env::args().nth(1) else {
@@ -53,6 +53,16 @@ fn main() {
             func.locals.len(),
             func.body.len()
         );
+
+        match validate::validate(func) {
+            Ok(layout) => println!(
+                "    peak stack {} ciphertext(s), {} split point(s)",
+                layout.max_depth,
+                layout.split_points.len()
+            ),
+            Err(error) => println!("    INVALID: {error}"),
+        }
+
         for (i, op) in func.body.iter().enumerate() {
             println!("    {i:>3}  {op:?}");
         }
