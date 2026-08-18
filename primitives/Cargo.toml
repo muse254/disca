@@ -1,0 +1,12 @@
+[package]
+name = "primitives"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description.workspace = true
+homepage.workspace = true
+
+[dependencies]
+tfhe = { workspace = true }
+wasmparser = { workspace = true }
+wast = { workspace = true }

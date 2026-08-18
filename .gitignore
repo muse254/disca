@@ -1,1 +1,16 @@
 /target
+
+# OS artifacts
+.DS_Store
+
+# LaTeX build artifacts (see whitepaper/Makefile)
+whitepaper/*.aux
+whitepaper/*.log
+whitepaper/*.out
+whitepaper/*.toc
+whitepaper/*.lof
+whitepaper/*.lot
+whitepaper/*.bbl
+whitepaper/*.blg
+whitepaper/*.synctex.gz
+whitepaper/*.pdf

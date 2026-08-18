@@ -1,0 +1,11 @@
+[package]
+name = "simple-arithmetic"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description.workspace = true
+homepage.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"

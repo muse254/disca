@@ -1,6 +1,18 @@
-[package]
-name = "disca"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = ["disca-cli", "node", "primitives", "simple-arithmetic"]
 
-[dependencies]
+[workspace.package]
+version = "0.2.0"
+authors = ["Osoro Bironga <fanosoro@gmail.com>"]
+edition = "2024"
+description = "Distributed Compute Automata"
+homepage = "https://github.com/muse254/disca"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+clap = "4.5"
+wasmparser = "0.244.0"
+wast = "244.0.0"
+tfhe = { version = "1.5", features = ["boolean", "shortint", "integer"] }
+primitives = { path = "primitives" }
