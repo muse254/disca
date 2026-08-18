@@ -31,7 +31,8 @@ memory-hungry). Sizes are `safe_serialize` wire sizes, not in-memory footprints.
 | Server key (compressed) | **28.8 MB** | 4x smaller; compresses in 438 ms. **This is what the coordinator should serve to workers.** |
 | Public key (public-key encryption mode) | 2.00 GB | **Impractical. Public-key mode is out of scope.** Multi-party input requires multi-key/threshold FHE → roadmap. |
 | `FheInt32` ciphertext (uncompressed) | 257.9 KB | Too big for calldata (~4.1M gas/value). Only exists inside the node network. |
-| `CompressedFheInt32` ciphertext | 2.3 KB | Calldata-viable (~38k gas on L1, cheaper on L2). **This is the on-chain wire format.** Compress/decompress ~1 ms each — negligible. |
+| `CompressedFheInt32`, freshly encrypted | 2.3 KB | The input wire format. Calldata-viable (~38k gas on L1, cheaper on L2). Compress/decompress ~1 ms each — negligible. |
+| `CompressedFheInt32`, **computed** | **11.8 KB** | A result that has been through the evaluator compresses ~5x worse than a fresh encryption: a fresh ciphertext compresses to a replayable PRNG seed, a computed one has no seed and must carry real coefficients. This is the size of the result blob `fulfillJob` carries. |
 | `FheBool` (comparison result) | 16.2 KB | Intermediate only; never crosses the boundary. |
 | Key generation | 685 ms | Per-program keygen is effectively free; do it at registration time. |
 | i32 add | 225 ms | |
@@ -96,11 +97,18 @@ allocation, built in release.
 | Worker nodes | Ciphertexts, circuit segment | Plaintext | ≤ threshold may lie about results; M-of-N attestation catches it |
 | Chain / observers | Commitments, bytecode hash, result commitment | Plaintext | — |
 
-**Deterministic evaluation property:** tfhe-rs evaluation is deterministic given
-the same input ciphertexts (randomness exists only at encryption time). Two honest
-workers executing the same circuit on the same inputs produce *byte-identical*
-result ciphertexts. This makes M-of-N result-hash matching a meaningful, cheap
-correctness check without any ZK machinery.
+**Deterministic evaluation property:** tfhe-rs evaluation *and* compression are
+deterministic given the same input ciphertexts (randomness exists only at
+encryption time). Two honest workers executing the same circuit on the same
+inputs produce *byte-identical* compressed result ciphertexts. This makes M-of-N
+result-hash matching a meaningful, cheap correctness check without any ZK
+machinery.
+
+Both halves are verified rather than assumed — `results_are_deterministic` and
+`compression_is_deterministic` in `primitives/src/wire.rs`. Compression is
+included because the attested hash covers the compressed blob, which is what
+lets the bridge contract verify the ciphertext it emits against the attestation
+(see bridge.md §5a).
 
 ## 4. System overview
 

@@ -53,11 +53,20 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
       WASM `select` maps onto tfhe's `IfThenElse::if_then_else` (confirmed in
       the size probe). Compare is 141 ms, select 200 ms — both cheap.
       **Blocks the demo. Highest-value item on the list.**
-- [ ] **1.2 Compressed ciphertext boundary.** `CompressedFheInt32` is the
-      documented wire format (architecture.md §2, bridge.md §1) but is only
-      touched by the size probe. Add encode/decode helpers at the crate edge;
-      keep evaluation on decompressed values. Measured at 2.3 KB and ~1 ms per
-      conversion, so this is pure plumbing.
+- [x] **1.2 Compressed ciphertext boundary.** `primitives/src/wire.rs` owns the
+      conversion, plus the two protocol hashes: `commitment()` over an encoded
+      input (bridge.md's `inputCommits`) and `result_hash()` over an evaluated
+      result (the M-of-N attestation value). Decoding is size-bounded against
+      untrusted peers. `results_are_deterministic` and `compression_is_deterministic`
+      verify the assumptions the whole attestation scheme rests on.
+- [x] **1.2a Decide what `resultHash` covers** — decided: the **compressed**
+      result, so `fulfillJob` can verify `keccak256(resultBlob) == resultHash`
+      and a coordinator cannot pair a real attestation with a substituted blob.
+      Emitting the result blob on-chain becomes required rather than optional.
+      Reasoning, cost, and the fallback (option C) in bridge.md §5a.
+- [ ] **1.2b Revisit 1.2a if results stop being single-valued.** 11.8 KB is the
+      cost of one `i32`; calldata grows linearly with output count, and ~10
+      values would already be too large for an ordinary transaction.
 - [x] **1.3 Locals as real storage.** Done alongside 1.1, which needed it:
       `DiscaFunction` carries its declared locals and the evaluator builds a
       frame of parameters followed by trivially encrypted zeros.
