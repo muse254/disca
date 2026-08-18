@@ -66,7 +66,23 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
       execution time on underflow. Cheaper to reject a malformed circuit when
       building `DiscaFunction` — and stack-depth-zero points are exactly what
       Phase 2 partitioning (architecture.md §6) needs anyway.
-- [ ] **1.5 Tests for the new opcodes** against plaintext reference semantics.
+- [x] **1.5 Tests for the new opcodes** against plaintext reference semantics.
+      Six execution tests run circuits under real encryption and check
+      decrypted results.
+
+## Track 1b — Observability
+
+- [x] **1b.1 Replace `println!` with `tracing`.** The node emits structured,
+      nested spans: `INFO` for phase timings (load / keygen / encrypt /
+      evaluate), `DEBUG` for a `circuit.run` span per circuit, `TRACE` for
+      per-opcode timings and stack depth. `RUST_LOG` controls verbosity. These
+      are the same measurements a worker will report to a coordinator in
+      Track 2, so the instrumentation is deliberately shaped like job telemetry
+      rather than debug printing.
+- [ ] **1b.2 Wire telemetry into the coordinator/worker roles** once 2.1 lands —
+      a job id field on every span, and worker-reported evaluation durations.
+- [ ] **1b.3 Decide on a machine-readable sink** (JSON layer, or OTLP export)
+      before the demo, so the video can show real job traces.
 
 ## Track 2 — Node roles (`node/`)
 

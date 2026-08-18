@@ -5,6 +5,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use tfhe::prelude::{CastFrom, FheEq, FheOrd, FheTrivialEncrypt, IfThenElse};
 use tfhe::{FheBool, FheInt32};
+use tracing::{Level, debug, enabled, trace};
 use wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef, ValType};
 use wincode::{SchemaRead, SchemaWrite};
 
@@ -125,6 +126,21 @@ impl DiscaFunction {
     /// beyond the parameters start at a trivially encrypted zero, as WASM
     /// requires; "trivial" here means the ciphertext carries no secret, which is
     /// correct because a zero-initialised local is not private information.
+    ///
+    /// Emits a `circuit.run` span. Homomorphic evaluation is where essentially
+    /// all of a worker's wall-clock goes, so this span is the measurement a
+    /// coordinator needs to reason about job latency; per-op timings are
+    /// available at `TRACE` when a circuit needs profiling.
+    #[tracing::instrument(
+        name = "circuit.run",
+        level = "debug",
+        skip_all,
+        fields(
+            function = self.name.as_deref().unwrap_or("<anonymous>"),
+            ops = self.body.len(),
+            inputs = inputs.len(),
+        )
+    )]
     pub fn run(&self, inputs: &[FheInt32]) -> Result<FheInt32> {
         if inputs.len() != self.sig.params.len() {
             return Err(ProgramError(format!(
@@ -143,8 +159,14 @@ impl DiscaFunction {
         );
 
         let mut stack: Vec<Value> = Vec::new();
+        // Timing every op costs an Instant per op, so only pay it when someone
+        // is actually listening at TRACE.
+        let profiling = enabled!(Level::TRACE);
+        let started = std::time::Instant::now();
 
-        for op in &self.body {
+        for (index, op) in self.body.iter().enumerate() {
+            let op_started = profiling.then(std::time::Instant::now);
+
             match op {
                 CircuitOp::LocalGet(index) => {
                     stack.push(local(&frame, *index)?.clone());
@@ -218,7 +240,22 @@ impl DiscaFunction {
                     stack.push(Value::Int(condition.if_then_else(&if_true, &if_false)));
                 }
             }
+
+            if let Some(op_started) = op_started {
+                trace!(
+                    index,
+                    op = ?op,
+                    depth = stack.len(),
+                    elapsed_ms = op_started.elapsed().as_millis(),
+                    "op evaluated"
+                );
+            }
         }
+
+        debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "circuit evaluated"
+        );
 
         if stack.len() != 1 {
             return Err(ProgramError(format!(
