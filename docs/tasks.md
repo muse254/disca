@@ -57,11 +57,13 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
       conversion, plus the two protocol hashes: `commitment()` over an encoded
       input (bridge.md's `inputCommits`) and `result_hash()` over an evaluated
       result (the M-of-N attestation value). Decoding is size-bounded against
-      untrusted peers. `results_are_deterministic` verifies the assumption the
-      whole attestation scheme rests on.
-- [ ] **1.2a Decide what `resultHash` covers** — uncompressed (current) or
-      compressed, which would let the contract verify the emitted blob on-chain.
-      Trade-off written up in bridge.md §5a.
+      untrusted peers. `results_are_deterministic` and `compression_is_deterministic`
+      verify the assumptions the whole attestation scheme rests on.
+- [x] **1.2a Decide what `resultHash` covers** — decided: the **compressed**
+      result, so `fulfillJob` can verify `keccak256(resultBlob) == resultHash`
+      and a coordinator cannot pair a real attestation with a substituted blob.
+      Emitting the result blob on-chain becomes required rather than optional.
+      Reasoning in bridge.md §5a.
 - [x] **1.3 Locals as real storage.** Done alongside 1.1, which needed it:
       `DiscaFunction` carries its declared locals and the evaluator builds a
       frame of parameters followed by trivially encrypted zeros.

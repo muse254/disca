@@ -23,17 +23,23 @@ recorded there.
 | Client key (23.5 KB, secret) | Key holder only, never transmitted | It is the privacy boundary |
 | Input ciphertexts | `CompressedFheInt32` (2.3 KB/value) in calldata/event; `keccak256` commitment in storage | Calldata-viable; on-chain availability proves inputs unchanged |
 | Working ciphertexts (257.9 KB/value, decompressed) | Node memory only | ~4.1M gas/value on-chain; pointless |
-| Result ciphertext | Coordinator-held; `keccak256` on-chain; compressed form optionally emitted like inputs | Key holder fetches off-chain and decrypts locally |
+| Result ciphertext | Compressed form **emitted on-chain**; `keccak256` of those same bytes stored as the attestation (see §5a) | Contract can verify blob against hash; key holder fetches and decrypts locally |
 | Escrow, job state, attester set | On-chain | It is the settlement layer |
 
 Gas sketch for a 3-input job (L1 constants; cheaper on L2):
 
 - Input blobs via event data: 3 x 2.3 KB x ~8 gas/byte = ~57k gas
 - Commitments in storage: 3 x 32 B slots = ~60k gas
-- `fulfillJob` (result hash + attester list + compressed result blob 2.3 KB):
-  order 70-120k gas
+- `fulfillJob` (result hash + attester list + compressed result blob **11.8 KB**,
+  paid once as calldata at ~16 gas/byte and once as event data at ~8 gas/byte):
+  order 250-350k gas
 
-Total well under a typical DeFi transaction. Demo is cheap even on L1 testnet.
+The result blob dominates, and it is 5x larger than an input blob: a freshly
+encrypted ciphertext compresses to a replayable PRNG seed, whereas a computed
+one has no seed and must carry real coefficients (11.8 KB measured, see
+architecture.md §2). That still lands inside the range of an ordinary DeFi
+transaction on L1, and is negligible on the L2 and Anvil targets in §7 — but it
+is the number to watch if job results ever grow beyond a single `i32`.
 
 ## 2. Contract interface (DiscaBridge.sol)
 
@@ -169,23 +175,43 @@ see: private inputs committed on-chain, distributed FHE execution attested
 
 ## 5a. Which bytes the result hash covers
 
-`primitives/src/wire.rs` hashes the **uncompressed** result ciphertext, so
-attestation depends only on evaluation being deterministic — the property
-`architecture.md` §3 claims and `results_are_deterministic` verifies.
+**Decided: the attested hash covers the compressed result** — the same blob the
+contract emits. `fulfillJob` therefore requires
 
-Compression turns out to be deterministic too (measured; pinned by
-`compression_is_not_relied_on_being_deterministic`). That makes a stronger
-variant available, and it is worth deciding deliberately before `fulfillJob`
-is written:
+```solidity
+require(keccak256(resultBlob) == resultHash, "blob does not match attestation");
+```
 
-| Option | `resultHash` covers | Consequence |
-|---|---|---|
-| **A — current** | uncompressed result | Attestation rests only on evaluation determinism. The contract stores a hash it cannot check against the `resultBlob` it emits. |
-| **B** | compressed result | The contract can verify `keccak256(resultBlob) == resultHash` on-chain, so the emitted blob is provably the attested one. Costs a dependency on compression determinism, which tfhe does not document as a guarantee. |
+so the ciphertext the key holder retrieves is provably the one M-of-N workers
+attested to.
 
-B is the better on-chain property; A is the safer assumption. Leaning A for the
-first implementation, with the canary test to tell us if B's precondition ever
-breaks.
+The alternative — hashing the uncompressed result — commits to bytes that never
+leave a worker and that no verifying party can obtain, which leaves a
+coordinator free to publish a genuinely-attested hash beside a substituted or
+garbage blob. Nothing on-chain would contradict it, and only the key holder
+would ever find out, after decrypting, with no evidence to dispute with.
+
+The cost is that attestation now depends on compression being deterministic as
+well as evaluation. Two points make that acceptable:
+
+- Both properties are verified in `primitives/src/wire.rs`
+  (`results_are_deterministic`, `compression_is_deterministic`).
+- If either broke, honest workers would report different hashes and the job
+  would fail to reach agreement — a timeout and refund, caught the first time
+  three workers run. It cannot silently yield a wrong answer.
+
+`primitives::wire::SealedResult` bundles the blob with its hash so the two
+cannot be handled separately.
+
+The choice is not free: it requires emitting an 11.8 KB blob, roughly 100-200k
+gas that option A could have skipped. On the Anvil and L2 targets in §7 that is
+negligible, and on L1 it keeps `fulfillJob` within an ordinary transaction, so
+the guarantee is worth paying for.
+
+**Consequence for §1:** emitting the compressed result on-chain is now
+*required*, not optional. The guarantee is the contract checking the emitted
+blob against the attested hash, which does nothing if the blob is never
+emitted.
 
 ## 6. Failure modes
 

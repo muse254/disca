@@ -113,6 +113,21 @@ fn main() {
     let (select_time, _) = timed(|| gt.if_then_else(&a, &b));
     println!("{:<34} {:>12}", "select", format_duration(select_time));
 
+    // --- results at the boundary ---------------------------------------------
+    // A freshly encrypted value compresses to a seed plus very little; a value
+    // that has been through the evaluator has no seed to replay, so it
+    // compresses far less well. The result blob is what `fulfillJob` carries,
+    // so this is the number the on-chain gas estimate depends on.
+    println!("\n== result at the boundary ==");
+    let (compress_result_time, compressed_result) = timed(|| sum.compress());
+    report_size("computed result (compressed)", &compressed_result);
+    report_size("fresh input (compressed)", &compressed);
+    println!(
+        "{:<34} {:>12}",
+        "result compression",
+        format_duration(compress_result_time)
+    );
+
     // --- sanity check --------------------------------------------------------
     // A probe that silently measured wrong arithmetic would be worse than none.
     let sum_plain: i32 = sum.decrypt(&client_key);

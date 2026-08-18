@@ -71,7 +71,7 @@ fn main() {
             .iter()
             .map(|value| {
                 let compressed = wire::encrypt_input(*value, &client_key).expect("encrypt input");
-                let encoded = wire::encode_input(&compressed).expect("encode input");
+                let encoded = wire::encode(&compressed).expect("encode input");
                 let commit = wire::commitment(&encoded);
 
                 info!(
@@ -80,7 +80,7 @@ fn main() {
                     "input committed"
                 );
 
-                let received = wire::decode_input(&encoded).expect("decode input");
+                let received = wire::decode(&encoded).expect("decode input");
                 wire::decompress(&received)
             })
             .collect();
@@ -105,15 +105,18 @@ fn main() {
 
         match func.run(&inputs) {
             Ok(output) => {
-                // The hash a worker would report for M-of-N attestation, and
-                // the compressed blob the key holder would fetch and decrypt.
-                let attestation = wire::result_hash(&output).expect("hash result");
-                let returned = wire::compress_result(&output);
-                let value: i32 = wire::decompress(&returned).decrypt(&client_key);
+                // What a worker reports for M-of-N attestation: the compressed
+                // blob that goes on-chain, and the hash the contract can
+                // recompute from it.
+                let sealed = wire::seal_result(&output).expect("seal result");
+                let value: i32 =
+                    wire::decompress(&wire::decode(&sealed.blob).expect("decode result"))
+                        .decrypt(&client_key);
 
                 info!(
                     result = value,
-                    result_hash = %bytecode::hex(&attestation),
+                    result_bytes = sealed.blob.len(),
+                    result_hash = %bytecode::hex(&sealed.hash),
                     elapsed_ms = started.elapsed().as_millis(),
                     "function evaluated"
                 );
