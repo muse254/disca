@@ -1,0 +1,12 @@
+
+The goal of the Distributed Compute Automata standard is to create infrastructure for logic and privacy computations.
+This is going to be achieved through the use of both software approaches and hardware approaches. The infrastructure comes with no batteries included and these sections
+can be as opinionated as needed, if you want to run your network with a software approach where you are purely using say Homomorphic Encryption then these implementations can be
+provided.
+
+The common denominator with all implementations will be that there is only as single VM that will run on the user-space nodes. Running a node should be as simple 
+as running a browser extension or running a desktop or mobile application.
+
+dsdsdsdsds
+
+

@@ -1,0 +1,13 @@
+[package]
+name = "disca-cli"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description.workspace = true
+homepage.workspace = true
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { workspace = true, features = ["derive", "cargo"] }
+wasmparser.workspace = true
+wast.workspace = true

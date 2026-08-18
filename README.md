@@ -1,5 +1,7 @@
 # disca
 
+Design docs: [docs/architecture.md](docs/architecture.md) · [docs/bridge.md](docs/bridge.md)
+
 ## White Paper: The Disca Specification
 
 The description and formal specification of the Disca protocol.
@@ -43,3 +45,8 @@ make
 ```sh
 make clean
 ```
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT License](LICENSE-MIT) at your option.

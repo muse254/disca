@@ -4,10 +4,24 @@
 \usepackage{geometry}
 \usepackage{url}
 \usepackage{hyperref}
+\usepackage{float}
+\usepackage{tikz}
+\usepackage{listings}
+\usepackage{xcolor}
+\usetikzlibrary{shapes,arrows,positioning,fit,backgrounds}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny,
+    tabsize=2
+}
 
 \geometry{margin=1in}
 
-\title{Distributed Compute Automata: A Standard for Logic and Data Privacy for Computations}
+\title{Distributed Compute Automata: A Standard for Logic and Data Privacy for Computations *draft}
 \author{Osoro Bironga, fanosoro@gmail.com}
 \date{\today}
 
@@ -40,14 +54,17 @@
 \centering
 \begin{minipage}{0.8\textwidth}
 \centering
-\textbf{Distributed Compute Automata} (DISCA) is a framework that enables experimentation and exploration of privacy-preserving computation approaches.
+\textbf{Distributed Compute Automata} (DISCA) is a computation approach implemented through a Virtual Machine (VM) that uses Fully Homomorphic Encryption (FHE) and operates as a distributed computer.
+DISCA is not a blockchain network; it is a distributed computing system with no dependence on any prior protocol.
+
 Privacy-preserving computation aims to protect the privacy of data and the computation itself. This means we don't know what the data is or what the computation is doing. 
 
 This is a very useful abstraction that can be applied to a scenario like running a proprietary algorithm in the open web without exposing the algorithm and without users exposing their data to you.
 
 In this work, we outline DISCA as a standard for logic and data privacy for computations.
-The framework's design is proposed and we analyze in detail the performance and security from a simple prototype built on Ethereum, leveraging its blockchain properties and guarantees.
-Lastly, we create a formal verification proof for the framework.
+DISCA operates as a distributed computer with its own protocol, designed through a VM that uses FHE with the aspirational goal of low barrier of entry and ubiquitous deployment on diverse devices including smartphones, though current computational requirements limit practical deployment on resource-constrained devices.
+Its design is proposed and we analyze security properties from a simple prototype.
+Lastly, we create a formal verification proof for the distributed computer.
 \end{minipage}
 \end{abstract}
 
@@ -55,27 +72,171 @@ Lastly, we create a formal verification proof for the framework.
 
 \section{Introduction}
 
-The framework is a technology stack that allows for both software and hardware approaches to the problem of privacy-preserving computation.
+DISCA is implemented through a Virtual Machine (VM) that uses Fully Homomorphic Encryption (FHE) and operates as a distributed computer.
+It is not a blockchain network, nor does it depend on any prior protocol.
+DISCA functions as a distributed computing system where nodes participate in computations through a VM that uses FHE, enabling computations on encrypted data without decryption.
+
+This work represents due diligence for larger work, consisting of informal experiments by the author.
+These experiments serve to establish that there is groundwork for the approach, demonstrating feasibility and exploring the design space rather than claiming to solve all challenges in the field.
 
 \subsection{Motivation}
 
-There is active work and research in the field of privacy-preserving computation (TODO: ADD REFERENCES).
-This proposal provides a much-needed playground for experimentation and exploration, a standard that would unify the approaches and provide a common interface for the development of privacy-preserving computation applications.
-This flexibility is crucial given the diverse landscape of privacy-preserving computation technologies, each with their own strengths and limitations.
+There is active work and research in the field~\cite{zama_fhe,phala_network}.
+DISCA focuses on Fully Homomorphic Encryption (FHE) as the primary approach.
+By providing a unified interface for FHE-based computations, DISCA aims to serve as a platform for:
+\begin{itemize}
+    \item \textbf{Research Exploration:} Testing new FHE techniques and approaches
+    \item \textbf{Practical Experimentation:} Trying out FHE-based approaches in various scenarios
+    \item \textbf{Algorithm Development:} Enabling developers to create and deploy proprietary algorithms using FHE without exposing the algorithm logic
+\end{itemize}
 
-The reason why the framework does not just use one of the approaches is because there are trade-offs between the approaches.
-For example, Homomorphic Encryption is a very powerful tool but it is computationally expensive.
-TEEs are more efficient but they are more complex to implement and they are more expensive to deploy.
+This work represents a first of many steps, rather than a definitive solution.
 
 \subsection{Preliminaries}
 
-Privacy-preserving methods through software are achieved through cryptography.
-More specifically with privacy-preserving computation we have Homomorphic Encryption (HE) and Fully Homomorphic Encryption (FHE).
-There are also cryptographic hybrid solutions that combine multiple techniques, such as Homomorphic Encryption (HE), Secure Multi-Party Computation (SMPC), and Zero-Knowledge Proofs (ZKPs), to achieve privacy-preserving computation.
+Methods through software are achieved through cryptography.
+More specifically we have Homomorphic Encryption (HE) and Fully Homomorphic Encryption (FHE).
+There are also cryptographic hybrid solutions that combine multiple techniques, such as Homomorphic Encryption (HE) and Zero-Knowledge Proofs (ZKPs).
 
-On the other side of the coin, we have Trusted Execution Environments (TEEs).
-TEEs are hardware-based solutions that provide a secure enclave where code and data can execute securely even in the presence of potentially compromised operating systems.
-TEEs offer better performance characteristics compared to pure software-based encryption approaches, making them more suitable for practical applications.
+However, it is important to note that the technology will be truly achieved when both cost and performance graphs trend downward, enabling practical deployment at scale.
+Currently, this goal remains aspirational: the necessary hardware infrastructure is not yet widely available, and software-based approaches remain computationally expensive by orders of magnitude compared to non-privacy-preserving alternatives.
+DISCA serves as an experimental platform to explore these technologies as they mature, rather than claiming to solve the performance and cost challenges today.
+
+\section{DISCA: A Distributed Computer}
+
+DISCA is a distributed computer that implements computation through a Virtual Machine (VM) that uses Fully Homomorphic Encryption (FHE).
+It is not a blockchain network, nor does it depend on any prior protocol or infrastructure.
+DISCA operates as an independent distributed computing system where nodes participate in computations.
+
+The system consists of nodes that communicate using DISCA's own protocol, operating as a distributed computer with no dependence on blockchain, smart contracts, or any other prior protocol infrastructure.
+DISCA is designed with the aspirational goal of low barrier of entry, enabling nodes to eventually run on diverse devices including smartphones, making ubiquitous deployment a long-term objective of the system, though current computational requirements limit practical deployment on resource-constrained devices.
+
+DISCA implements its own networking layer for peer-to-peer communication, network discovery, and message routing.
+This independent networking implementation allows DISCA to operate as a self-contained distributed computer focused on computation through a VM that uses FHE, without dependencies on external protocols or infrastructure.
+
+\subsection{Circuit Design}
+
+DISCA transforms programs into FHE circuits through a systematic approach that leverages WebAssembly (WASM) as an intermediate representation.
+This approach enables the construction of circuits from standard programming languages while maintaining the security and isolation properties required for distributed execution.
+
+\subsubsection{Compilation to WebAssembly}
+
+Programs written in high-level languages (Rust, C/C++, Go, etc.) are first compiled to WebAssembly format.
+This compilation step is crucial for several reasons:
+
+\begin{itemize}
+    \item \textbf{WASM Stack Machine Standard:} We use the WASM stack machine standard to create our FHE circuits.
+    The stack-based architecture provides a clean, predictable execution model that maps well to homomorphic encryption operations.
+    Each stack operation can be directly translated into FHE circuit gates.
+
+    \item \textbf{Simple Register Model:} WASM's stack-based execution model is simpler than register-based architectures, making it easier to reason about and transform into FHE circuits.
+    The explicit stack operations eliminate the need to track register state across operations.
+
+    \item \textbf{Language Support:} WASM is supported by many programming languages, allowing developers to write programs in their preferred language and compile to a common format.
+    This enables a diverse ecosystem of tools and languages while maintaining a unified circuit generation pipeline.
+
+    \item \textbf{Sandboxing:} WASM provides built-in sandboxing capabilities, ensuring that programs execute in an isolated environment with controlled memory access and execution boundaries.
+    This isolation is essential for maintaining privacy guarantees in the distributed computer.
+\end{itemize}
+
+\subsubsection{Conversion to WebAssembly Text Format}
+
+After compilation, the binary WASM file is converted to WebAssembly Text Format (WAT) for analysis and circuit generation:
+
+\begin{verbatim}
+wasm-tools print sample_program.wasm -o sample_program.wat
+\end{verbatim}
+
+The WAT format serves several critical purposes in the circuit design process:
+
+\begin{itemize}
+    \item \textbf{Step-through Register Operations:} WAT format allows us to step through stack operations instead of dealing with binary data, making it easier to understand and analyze the program's execution flow.
+    Each instruction can be examined individually to determine its corresponding FHE circuit representation.
+
+    \item \textbf{Human-Readable Analysis:} The text format enables developers and researchers to inspect the program structure, function signatures, and instruction sequences.
+    This transparency facilitates verification and debugging of the circuit generation process.
+
+    \item \textbf{Circuit Analysis:} The WAT representation makes it straightforward to analyze how operations map to FHE circuit construction.
+    Each WASM instruction (e.g., \texttt{i32.add}, \texttt{i32.mul}, \texttt{i32.gt\_s}) can be mapped to corresponding FHE operations, allowing systematic circuit generation.
+
+    \item \textbf{Debugging and Verification:} WAT format facilitates debugging and verification of the program's transformation from source code to WASM instructions, and ultimately to FHE circuits.
+\end{itemize}
+
+\subsubsection{Sample Program}
+
+To demonstrate the circuit design approach, we provide an oversimplified example program that implements basic arithmetic operations.
+The sample program includes three simple functions: \texttt{add}, \texttt{multiply}, and \texttt{subtract}.
+
+This oversimplified example demonstrates how basic arithmetic operations are transformed into stack-based instructions that can be mapped to FHE circuit gates.
+Each function is compiled to WASM and converted to WAT, providing a clear mapping from high-level operations to stack-based instructions.
+Note that this example is intentionally simplified for the purpose of this paper; typical programs are much more complex, involving control flow, state management, loops, conditionals, and multi-step computations with intermediate values.
+
+The Rust source code for the sample program is shown below:
+
+\begin{lstlisting}[language=Rust, caption={Sample Program Source Code (lib.rs)}]
+#[unsafe(no_mangle)]
+pub extern "C" fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn subtract(a: i32, b: i32) -> i32 {
+    a - b
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn multiply(a: i32, b: i32) -> i32 {
+    a * b
+}
+\end{lstlisting}
+
+After compilation to WASM and conversion to WAT, the resulting WebAssembly Text Format representation demonstrates how high-level operations are transformed into stack-based instructions.
+Note that compiler-generated WAT includes metadata such as memory management, stack pointers, and producer information.
+If we remove this metadata, WebAssembly Text Format can be written by hand quite simply.
+For example, a minimal hello world program can be written as:
+
+\begin{lstlisting}[language=Lisp, caption={Minimal WebAssembly Text Format Example}]
+(module
+  (func (result i32)
+    (i32.const 42)
+  )
+  (export "helloWorld" (func 0))
+)
+\end{lstlisting}
+
+For our arithmetic example, removing the compiler-generated metadata yields a simplified representation:
+
+\begin{lstlisting}[language=Lisp, caption={Simplified WebAssembly Text Format (simple\_arithmetic.wat)}]
+(module
+  (func $add (param i32 i32) (result i32)
+    local.get 1
+    local.get 0
+    i32.add
+  )
+  (func $multiply (param i32 i32) (result i32)
+    local.get 1
+    local.get 0
+    i32.mul
+  )
+  (func $subtract (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.sub
+  )
+  (export "add" (func $add))
+  (export "multiply" (func $multiply))
+  (export "subtract" (func $subtract))
+)
+\end{lstlisting}
+
+After generation of the final WAT file, the WebAssembly Standard, the text format in particular, is effectively our Intermediate Representation (IR).
+We will not be using WebAssembly directly, but rather its instruction set as our IR.
+This IR can now be decomposed into FHE circuits, where each WebAssembly instruction maps to corresponding homomorphic operations.
+
+The WAT representation clearly shows how each function is decomposed into stack operations.
+For example, the \texttt{add} function uses \texttt{local.get} instructions to push parameters onto the stack, followed by \texttt{i32.add} to perform the addition.
+Similarly, \texttt{subtract} and \texttt{multiply} follow the same pattern with their respective operations (\texttt{i32.sub}, \texttt{i32.mul}).
+These stack-based instructions provide a clear foundation for mapping to FHE circuit gates, where each operation can be represented as a homomorphic computation over encrypted values.
 
 \section{References}
 

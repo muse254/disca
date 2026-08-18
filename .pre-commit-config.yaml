@@ -5,4 +5,18 @@ repos:
   - repo: https://github.com/crate-ci/typos
     rev: v1.33.1
     hooks:
+      # .wat files are compiler-generated; don't spell-check them
       - id: typos
+        exclude: \.wat$
+  - repo: local
+    hooks:
+      - id: cargo-check
+        name: cargo check
+        entry: cargo check
+        language: system
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy
+        language: system
+        pass_filenames: false
