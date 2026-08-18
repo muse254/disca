@@ -61,11 +61,12 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
 - [x] **1.3 Locals as real storage.** Done alongside 1.1, which needed it:
       `DiscaFunction` carries its declared locals and the evaluator builds a
       frame of parameters followed by trivially encrypted zeros.
-- [ ] **1.4 Validate stack discipline at compile time.** `run()` errors at
-      execution time on underflow. Cheaper to reject a malformed circuit when
-      building `DiscaFunction` — and stack-depth-zero points are exactly what
-      Phase 2 partitioning (architecture.md §6) needs anyway. Becomes more
-      valuable once 4.1 starts feeding real compiler output through the parser.
+- [x] **1.4 Validate stack discipline at compile time.** `primitives/src/validate.rs`
+      walks a lowered circuit checking arity, local addressing and final stack
+      depth, and returns a `CircuitLayout` carrying peak stack depth and the
+      split points Phase 2 partitioning needs. `bytecode::deserialize` runs it
+      over every blob it accepts, so a worker rejects a bad circuit from the
+      network before evaluating a gate rather than minutes in.
 - [x] **1.5 Tests for the new opcodes** against plaintext reference semantics.
       Six execution tests run circuits under real encryption and check
       decrypted results.

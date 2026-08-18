@@ -77,6 +77,18 @@ pub fn deserialize(bytes: &[u8]) -> Result<DiscaProgram> {
     let functions: Vec<DiscaFunction> = wincode::deserialize_exact(&bytes[HEADER_LEN..])
         .map_err(|e| ProgramError(format!("failed to decode bytecode: {e:?}")))?;
 
+    // Decoding proves the bytes are well formed; it says nothing about whether
+    // the circuit they describe can run. A worker should find that out here,
+    // not minutes into homomorphic evaluation.
+    for (index, func) in functions.iter().enumerate() {
+        crate::validate::validate(func).map_err(|e| {
+            let name = func.name.as_deref().unwrap_or("<anonymous>");
+            ProgramError(format!(
+                "function {index} ({name}) is not a valid circuit: {e}"
+            ))
+        })?;
+    }
+
     Ok(DiscaProgram::from_functions(functions))
 }
 
@@ -232,6 +244,28 @@ mod tests {
             via_wincode, via_bincode,
             "wincode diverged from bincode 1.x default encoding"
         );
+    }
+
+    #[test]
+    fn rejects_bytecode_describing_an_unrunnable_circuit() {
+        // Bytecode arrives from the network. It can decode cleanly and still
+        // describe a circuit that underflows, so decoding validates too.
+        use crate::program::{CircuitOp, DiscaFunction, FuncSig, NumType};
+
+        let broken = DiscaProgram::from_functions(vec![DiscaFunction {
+            name: Some("broken".into()),
+            sig: FuncSig {
+                params: vec![NumType::I32],
+                results: vec![NumType::I32],
+            },
+            locals: vec![],
+            body: vec![CircuitOp::LocalGet(0), CircuitOp::Add],
+        }]);
+
+        let bytes = serialize(&broken).unwrap();
+        let err = deserialize(&bytes).unwrap_err();
+        assert!(err.to_string().contains("broken"), "names it: {err}");
+        assert!(err.to_string().contains("underflow"), "says why: {err}");
     }
 
     #[test]
