@@ -34,7 +34,8 @@ const MAGIC: [u8; 4] = *b"DSCA";
 
 /// Bump on any change to the encoding of the payload that follows the header.
 /// Programs registered under an older version keep their old hash and must be
-/// re-registered.
+/// re-registered, so this only moves once a version has actually been used to
+/// register something.
 pub const BYTECODE_VERSION: u16 = 1;
 
 /// Length of the fixed header: magic (4) + version (2).

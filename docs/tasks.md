@@ -46,7 +46,7 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
 
 ## Track 1 — Execution core (`primitives/`)
 
-- [ ] **1.1 Opcode expansion.** Add `I32Eq`, `I32Ne`, `I32LtS`, `I32GtS`,
+- [x] **1.1 Opcode expansion.** Add `I32Eq`, `I32Ne`, `I32LtS`, `I32GtS`,
       `I32GeS`, `I32LeS`, `Select`, `LocalSet`, `LocalTee`. FHE comparisons
       return `FheBool`, so `DiscaFunction::run` needs a stack value type that is
       either `FheInt32` or `FheBool` rather than today's `Vec<FheInt32>`.
@@ -58,15 +58,31 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
       touched by the size probe. Add encode/decode helpers at the crate edge;
       keep evaluation on decompressed values. Measured at 2.3 KB and ~1 ms per
       conversion, so this is pure plumbing.
-- [ ] **1.3 Locals as real storage.** `Function.locals` is parsed and then
-      discarded; `circuit_sequence()` maps `LocalGet(i)` straight to input index
-      `i`. Once `local.set` exists, the evaluator needs a locals frame distinct
-      from the input vector.
+- [x] **1.3 Locals as real storage.** Done alongside 1.1, which needed it:
+      `DiscaFunction` carries its declared locals and the evaluator builds a
+      frame of parameters followed by trivially encrypted zeros.
 - [ ] **1.4 Validate stack discipline at compile time.** `run()` errors at
       execution time on underflow. Cheaper to reject a malformed circuit when
       building `DiscaFunction` — and stack-depth-zero points are exactly what
-      Phase 2 partitioning (architecture.md §6) needs anyway.
-- [ ] **1.5 Tests for the new opcodes** against plaintext reference semantics.
+      Phase 2 partitioning (architecture.md §6) needs anyway. Becomes more
+      valuable once 4.1 starts feeding real compiler output through the parser.
+- [x] **1.5 Tests for the new opcodes** against plaintext reference semantics.
+      Six execution tests run circuits under real encryption and check
+      decrypted results.
+
+## Track 1b — Observability
+
+- [x] **1b.1 Replace `println!` with `tracing`.** The node emits structured,
+      nested spans: `INFO` for phase timings (load / keygen / encrypt /
+      evaluate), `DEBUG` for a `circuit.run` span per circuit, `TRACE` for
+      per-opcode timings and stack depth. `RUST_LOG` controls verbosity. These
+      are the same measurements a worker will report to a coordinator in
+      Track 2, so the instrumentation is deliberately shaped like job telemetry
+      rather than debug printing.
+- [ ] **1b.2 Wire telemetry into the coordinator/worker roles** once 2.1 lands —
+      a job id field on every span, and worker-reported evaluation durations.
+- [ ] **1b.3 Decide on a machine-readable sink** (JSON layer, or OTLP export)
+      before the demo, so the video can show real job traces.
 
 ## Track 2 — Node roles (`node/`)
 
