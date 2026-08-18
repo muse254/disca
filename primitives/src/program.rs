@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tfhe::prelude::{CastFrom, FheEq, FheOrd, FheTrivialEncrypt, IfThenElse};
 use tfhe::{FheBool, FheInt32};
 use wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef, ValType};
+use wincode::{SchemaRead, SchemaWrite};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramError(pub String);
@@ -20,12 +21,12 @@ impl Error for ProgramError {}
 
 type Result<T> = std::result::Result<T, ProgramError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub enum NumType {
     I32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct FuncSig {
     pub params: Vec<NumType>,
     pub results: Vec<NumType>,
@@ -51,7 +52,7 @@ pub enum Instr {
     Select,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub enum CircuitOp {
     LocalGet(u32),
     LocalSet(u32),
@@ -75,7 +76,7 @@ pub enum CircuitOp {
     Select,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct DiscaFunction {
     pub name: Option<String>,
     pub sig: FuncSig,
