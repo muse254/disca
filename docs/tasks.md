@@ -23,35 +23,41 @@ and the demo in architecture.md §10 can't be built until **1.1** lands:
 
 Cheap, unblocks estimation, and none of it burns hackathon hours.
 
-- [ ] **0.1 Commit the measurement harness.** The numbers in architecture.md §2
+- [x] **0.1 Commit the measurement harness.** The numbers in architecture.md §2
       came from a `size_probe` example that was never checked in — only its
       build artifacts survive in `target/`. Recreate it as `examples/size_probe.rs`
       so the table is reproducible.
-- [ ] **0.2 Re-measure in release mode** and update architecture.md §2. Debug
-      i32 mul is ~178 s; release is typically 10–100x faster. This number sets
-      the max circuit size for a ≤5 min demo (architecture.md §11 Q1).
-- [ ] **0.3 Serialization format for `CircuitOp` / `DiscaFunction`.** Currently
-      there is none, so `keccak256(bytecode)` — which the entire bridge design
-      pins on-chain — is not computable. Add `serde` + a stable binary encoding
-      and a `bytecode_hash()` helper. **Blocks all of Track 3.**
-- [ ] **0.4 Speed up the test loop.** `cargo test -p primitives` takes ~8 min in
-      debug. Add a `[profile.test]` opt-level bump, or gate the adder truth-table
-      tests behind a feature so the fast parser tests stay fast.
+- [x] **0.2 Re-measure in release mode** — done; architecture.md §2 and
+      bridge.md §1/§3 now carry release numbers. Release is 87–98x faster
+      (add 22 s → 225 ms, mul 178 s → 2.04 s). **Circuit size is no longer a
+      binding constraint on the demo**; architecture.md §11 Q1 is answered.
+- [x] **0.3 Serialization format for `CircuitOp` / `DiscaFunction`.** Done:
+      `primitives/src/bytecode.rs` — magic+version header, pinned bincode
+      config (fixint / little-endian / reject-trailing), `bytecode_hash()`
+      returning keccak256. **Track 3 is unblocked.**
+- [x] **0.4 Speed up the test loop.** Done: `[profile.dev.package."*"]` and
+      `[profile.test.package."*"]` at `opt-level = 3` in the root manifest.
+      Test suite went from **464.70 s to 4.70 s**.
 - [ ] **0.5 Decide the open questions** in architecture.md §11 (3: attester
       scheme, 4: transport, 5: chain target). The doc already leans address-list
-      / HTTP / Anvil — just confirm and strike them.
+      / HTTP / Anvil — just confirm and strike them. Q1 (circuit size) is now
+      answered by 0.2; Q2 (server key distribution) is easier than assumed —
+      the compressed server key is 28.8 MB, not 114.8 MB.
 
 ## Track 1 — Execution core (`primitives/`)
 
 - [ ] **1.1 Opcode expansion.** Add `I32Eq`, `I32Ne`, `I32LtS`, `I32GtS`,
       `I32GeS`, `I32LeS`, `Select`, `LocalSet`, `LocalTee`. FHE comparisons
-      return `FheBool`, so `CircuitOp::run` needs a stack value type that is
+      return `FheBool`, so `DiscaFunction::run` needs a stack value type that is
       either `FheInt32` or `FheBool` rather than today's `Vec<FheInt32>`.
-      **Blocks the demo.**
+      WASM `select` maps onto tfhe's `IfThenElse::if_then_else` (confirmed in
+      the size probe). Compare is 141 ms, select 200 ms — both cheap.
+      **Blocks the demo. Highest-value item on the list.**
 - [ ] **1.2 Compressed ciphertext boundary.** `CompressedFheInt32` is the
-      documented wire format (architecture.md §2, bridge.md §1) but appears
-      nowhere in code. Add encode/decode helpers at the crate edge; keep
-      evaluation on decompressed values.
+      documented wire format (architecture.md §2, bridge.md §1) but is only
+      touched by the size probe. Add encode/decode helpers at the crate edge;
+      keep evaluation on decompressed values. Measured at 2.3 KB and ~1 ms per
+      conversion, so this is pure plumbing.
 - [ ] **1.3 Locals as real storage.** `Function.locals` is parsed and then
       discarded; `circuit_sequence()` maps `LocalGet(i)` straight to input index
       `i`. Once `local.set` exists, the evaluator needs a locals frame distinct
@@ -70,8 +76,8 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
 - [ ] **2.3 Coordinator dispatch** — fan a job to N workers, collect
       `keccak256(result ct)`, compare M-of-N.
 - [ ] **2.4 Server key distribution** — coordinator serves `GET /keys/<hash>`,
-      workers pull once and cache. Confirm 120 MB is fine locally
-      (architecture.md §11 Q2).
+      workers pull once and cache. Serve the **compressed** key: 28.8 MB, not
+      114.8 MB (architecture.md §11 Q2 — comfortably fine locally).
 - [ ] **2.5 Local 1-coordinator + 3-worker run** with 2-of-3 attestation, no
       chain yet.
 
