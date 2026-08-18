@@ -109,95 +109,97 @@ involved.
 
 ### 2.0 Decisions to settle before writing code
 
-- [ ] **2.0a HTTP library.** Evaluation is CPU-bound and blocking — a tally is
+- [x] **2.0a HTTP library.** Evaluation is CPU-bound and blocking — a tally is
       ~1 s, a multiply ~2 s — so async buys very little at three workers.
       Recommend a threaded sync server (`tiny_http`) over `axum` + `tokio`:
       far fewer dependencies, and blocking FHE work inside a handler is honest
       rather than something to design around. Revisit only if the coordinator
       needs many concurrent connections.
-- [ ] **2.0b Payload encoding.** We already carry two encoders — `wincode` for
+- [x] **2.0b Payload encoding.** We already carry two encoders — `wincode` for
       bytecode, tfhe's `safe_serialize` for ciphertexts. Reuse both rather than
       adding a third: JSON for control fields, length-prefixed raw bytes for
       ciphertext and bytecode blobs.
-- [ ] **2.0c Worker identity.** architecture.md §11 Q3 leans an on-chain
+- [x] **2.0c Worker identity.** architecture.md §11 Q3 leans an on-chain
       registered address list over signature aggregation. Confirm it — it
       decides whether a worker needs a keypair at all in Phase 1, and therefore
       whether `POST /results` needs to be authenticated.
-- [ ] **2.0d Job identifier.** Chain-assigned `jobId` does not exist until
+- [x] **2.0d Job identifier.** Chain-assigned `jobId` does not exist until
       Track 3. Use a coordinator-local monotonic id now and make it the
       correlation key everywhere (see 2.7), so swapping in the on-chain id later
       touches one place.
 
 ### 2.1 Protocol types (`node/src/protocol.rs`)
 
-- [ ] Define the messages in one module, independent of the transport that
+- [x] Define the messages in one module, independent of the transport that
       carries them: `JobDispatch` (job id, bytecode, input blobs), `JobReport`
       (job id, worker id, result blob + attestation hash, or a failure), and the
       key-fetch response.
-- [ ] Reuse `primitives::wire::SealedResult` for what a worker reports, so blob
+- [x] Reuse `primitives::wire::SealedResult` for what a worker reports, so blob
       and hash cannot be handled apart even across the wire.
-- [ ] Round-trip tests per message.
+- [x] Round-trip tests per message.
 
 ### 2.2 Role dispatch (`node/src/main.rs`)
 
-- [ ] `--role coordinator|worker` behind clap, replacing the hardcoded demo.
-- [ ] Coordinator flags: bind address, worker addresses, `--attesters M`.
-- [ ] Worker flags: bind address, coordinator address, worker id.
-- [ ] Keep the current single-process demo reachable as `--role demo`, since it
+- [x] `--role coordinator|worker` behind clap, replacing the hardcoded demo.
+- [x] Coordinator flags: bind address, worker addresses, `--attesters M`.
+- [x] Worker flags: bind address, coordinator address, worker id.
+- [x] Keep the current single-process demo reachable as `--role demo`, since it
       is the fastest way to check the core still works without standing up a
       network.
 
 ### 2.3 Worker
 
-- [ ] Serve `POST /jobs`: decode bytecode, **validate before evaluating**
+- [x] Serve `POST /jobs`: decode bytecode, **validate before evaluating**
       (`bytecode::deserialize` already does this — surface the rejection as a
       failure report rather than a dropped connection).
-- [ ] Decompress inputs, evaluate, `seal_result`, report to the coordinator.
-- [ ] Verify each input blob against its commitment on receipt; a worker should
+- [x] Decompress inputs, evaluate, `seal_result`, report to the coordinator.
+- [x] Verify each input blob against its commitment on receipt; a worker should
       not evaluate over bytes the coordinator altered in transit.
-- [ ] Report failures explicitly. A worker that cannot evaluate must say so —
+- [x] Report failures explicitly. A worker that cannot evaluate must say so —
       silence is indistinguishable from being slow, and stalls the job.
 
 ### 2.4 Coordinator
 
-- [ ] Serve `POST /results` (worker reports) and `GET /result/<jobId>` (key
-      holder fetches the winning blob).
-- [ ] Dispatch a job to N workers concurrently.
-- [ ] Collect reports until M agree on an attestation hash, or the deadline
+- [x] Serve `POST /results` (worker reports).
+- [ ] `GET /result/<jobId>` for the key holder. Deferred: the coordinator still
+      stands in for the key holder (`KeyHolder` in `coordinator.rs`), so there
+      is nobody to serve yet. Needed when they split in Track 3.
+- [x] Dispatch a job to N workers concurrently.
+- [x] Collect reports until M agree on an attestation hash, or the deadline
       passes.
 
 ### 2.5 Server key distribution
 
-- [ ] Coordinator serves `GET /keys/<serverKeyHash>`; workers pull once and
+- [x] Coordinator serves `GET /keys/<serverKeyHash>`; workers pull once and
       cache by hash.
-- [ ] Serve the **compressed** key: 28.8 MB, not 114.8 MB (measured — this
+- [x] Serve the **compressed** key: 28.8 MB, not 114.8 MB (measured — this
       answers architecture.md §11 Q2 and makes the pull comfortable locally).
-- [ ] Workers verify the hash of what they received before installing it.
+- [x] Workers verify the hash of what they received before installing it.
 
 ### 2.6 M-of-N aggregation
 
-- [ ] Group reports by attestation hash; succeed at the first hash reaching M.
-- [ ] **Disagreement is a finding, not noise.** Determinism is verified
+- [x] Group reports by attestation hash; succeed at the first hash reaching M.
+- [x] **Disagreement is a finding, not noise.** Determinism is verified
       (1.2), so honest workers cannot disagree — a mismatch means a faulty or
       dishonest worker. Log which worker reported what, and mark the job
       disputed rather than quietly retrying.
-- [ ] Timeout → job fails, refundable (mirrors `refundOnTimeout` in bridge.md §6).
+- [x] Timeout → job fails, refundable (mirrors `refundOnTimeout` in bridge.md §6).
 
 ### 2.7 Job-scoped telemetry (absorbs 1b.2)
 
-- [ ] Put `job_id` on every span on both sides, so one job's path through the
+- [x] Put `job_id` on every span on both sides, so one job's path through the
       coordinator and three workers is a single filterable trace.
-- [ ] Coordinator logs the agreed hash, the attester set, and per-worker
+- [x] Coordinator logs the agreed hash, the attester set, and per-worker
       latency — the same fields `fulfillJob` will eventually take on-chain.
 
 ### 2.8 Local end-to-end run
 
-- [ ] Script one coordinator + three workers as local processes, 2-of-3
+- [x] Script one coordinator + three workers as local processes, 2-of-3
       attestation, no chain.
-- [ ] Include a deliberately faulty worker in the script — a wrong result is the
+- [x] Include a deliberately faulty worker in the script — a wrong result is the
       only way to demonstrate that M-of-N does anything, and it is the most
       convincing thing in the eventual demo video.
-- [ ] Assert the key holder decrypts the expected plaintext at the end.
+- [x] Assert the key holder decrypts the expected plaintext at the end.
 
 ## Track 3 — Bridge (`bridge/`, new Foundry project) — needs 0.3
 

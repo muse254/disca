@@ -9,5 +9,9 @@ homepage.workspace = true
 [dependencies]
 tfhe = { workspace = true }
 primitives = { path = "../primitives" }
+clap = { workspace = true, features = ["derive"] }
+wincode = { workspace = true }
+tiny_http = { workspace = true }
+ureq = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

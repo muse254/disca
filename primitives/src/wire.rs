@@ -37,7 +37,8 @@
 use sha3::{Digest, Keccak256};
 use tfhe::prelude::FheTryEncrypt;
 use tfhe::safe_serialization::{safe_deserialize, safe_serialize};
-use tfhe::{ClientKey, CompressedFheInt32, FheInt32};
+use tfhe::{ClientKey, CompressedFheInt32, CompressedServerKey, FheInt32, ServerKey};
+use wincode::{SchemaRead, SchemaWrite};
 
 use crate::program::ProgramError;
 
@@ -54,12 +55,39 @@ pub const MAX_CIPHERTEXT_BYTES: u64 = 4 * 1024 * 1024;
 /// The pairing is the point: `blob` is what the contract emits and the key
 /// holder decrypts, `hash` is what workers attest to, and because the hash is
 /// only ever derived from the blob here, the two cannot be made to disagree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct SealedResult {
     /// The compressed result ciphertext, as it goes on-chain.
     pub blob: Vec<u8>,
     /// `keccak256(blob)` — the attestation value, verifiable by the contract.
     pub hash: [u8; 32],
+}
+
+/// Upper bound accepted when decoding a server key.
+///
+/// The compressed server key measures 28.8 MB, four times smaller than the
+/// uncompressed 114.8 MB — which is why the compressed form is what the
+/// coordinator serves. The bound leaves headroom without letting a peer name an
+/// arbitrary allocation.
+pub const MAX_SERVER_KEY_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Encodes the compressed server key for distribution to workers.
+pub fn encode_server_key(key: &CompressedServerKey) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    safe_serialize(key, &mut out, MAX_SERVER_KEY_BYTES)
+        .map_err(|e| ProgramError(format!("failed to encode server key: {e}")))?;
+    Ok(out)
+}
+
+/// Decodes a server key pulled from the coordinator.
+///
+/// Callers must check [`commitment`] of the bytes against the hash they asked
+/// for *before* installing the key — the whole point of addressing keys by hash
+/// is that a worker never trusts what it was handed.
+pub fn decode_server_key(bytes: &[u8]) -> Result<ServerKey> {
+    let compressed: CompressedServerKey = safe_deserialize(bytes, MAX_SERVER_KEY_BYTES)
+        .map_err(|e| ProgramError(format!("failed to decode server key: {e}")))?;
+    Ok(compressed.decompress())
 }
 
 /// Encrypts a value into the compressed form that crosses the boundary.
@@ -296,6 +324,29 @@ mod tests {
             "result blob grew to {} bytes, which would change the gas sketch",
             sealed.blob.len()
         );
+    }
+
+    #[test]
+    fn a_server_key_survives_distribution() {
+        use tfhe::CompressedServerKey;
+
+        let (client_key, _) = generate_keys(ConfigBuilder::default().build());
+        let compressed = CompressedServerKey::new(&client_key);
+
+        let bytes = encode_server_key(&compressed).unwrap();
+        let hash = commitment(&bytes);
+
+        // A worker addresses the key by hash and verifies before installing.
+        assert_eq!(commitment(&bytes), hash);
+        let key = decode_server_key(&bytes).unwrap();
+        set_server_key(key);
+
+        // The installed key must actually be able to evaluate.
+        let program = DiscaProgram::from_program(&Program::from_wat(MAX).unwrap());
+        let func = program.function("max").unwrap();
+        let inputs = vec![deliver(4, &client_key), deliver(1, &client_key)];
+        let plain: i32 = func.run(&inputs).unwrap().decrypt(&client_key);
+        assert_eq!(plain, 4);
     }
 
     #[test]
