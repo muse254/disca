@@ -3,7 +3,8 @@ use std::error::Error;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use tfhe::FheInt32;
+use tfhe::prelude::{CastFrom, FheEq, FheOrd, FheTrivialEncrypt, IfThenElse};
+use tfhe::{FheBool, FheInt32};
 use wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef, ValType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,60 +34,201 @@ pub struct FuncSig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instr {
     LocalGet(u32),
+    LocalSet(u32),
+    LocalTee(u32),
+    I32Const(i32),
+    Drop,
     I32Add,
     I32Mul,
     I32Sub,
+    I32Eq,
+    I32Ne,
+    I32Eqz,
+    I32LtS,
+    I32GtS,
+    I32LeS,
+    I32GeS,
+    Select,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CircuitOp {
     LocalGet(u32),
+    LocalSet(u32),
+    LocalTee(u32),
+    /// A literal from the program text. Constants are part of the bytecode and
+    /// therefore already public, so they are trivially encrypted rather than
+    /// treated as secret inputs.
+    Const(i32),
+    Drop,
     Add,
     Mul,
     Sub,
+    Eq,
+    Ne,
+    /// `i32.eqz` — compares against zero.
+    Eqz,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Select,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscaFunction {
     pub name: Option<String>,
     pub sig: FuncSig,
+    /// Locals declared beyond the parameters. WASM addresses parameters and
+    /// declared locals through a single index space, parameters first.
+    pub locals: Vec<NumType>,
     pub body: Vec<CircuitOp>,
+}
+
+/// A value on the evaluation stack.
+///
+/// WASM has no boolean type: comparisons push an `i32` that is 0 or 1, and
+/// `select` tests its condition against zero. FHE draws the line differently —
+/// comparisons yield an [`FheBool`] and `if_then_else` requires one. Modelling
+/// both shapes lets the common compare-then-select path stay cast-free, and
+/// confines conversion to the rare program that does arithmetic on a
+/// comparison result.
+#[derive(Clone)]
+enum Value {
+    Int(FheInt32),
+    Bool(FheBool),
+}
+
+impl Value {
+    /// Coerces to an integer, matching WASM's `i32` view of a boolean.
+    fn into_int(self) -> FheInt32 {
+        match self {
+            Self::Int(v) => v,
+            Self::Bool(v) => FheInt32::cast_from(v),
+        }
+    }
+
+    /// Coerces to a boolean, matching WASM's "nonzero is true" rule.
+    fn into_bool(self) -> FheBool {
+        match self {
+            Self::Bool(v) => v,
+            Self::Int(v) => v.ne(0i32),
+        }
+    }
 }
 
 impl DiscaFunction {
     /// Runs the FHE circuit using stack-machine semantics and returns the result.
+    ///
+    /// `inputs` supplies the function's parameters, in order. Locals declared
+    /// beyond the parameters start at a trivially encrypted zero, as WASM
+    /// requires; "trivial" here means the ciphertext carries no secret, which is
+    /// correct because a zero-initialised local is not private information.
     pub fn run(&self, inputs: &[FheInt32]) -> Result<FheInt32> {
-        let mut stack: Vec<FheInt32> = Vec::new();
+        if inputs.len() != self.sig.params.len() {
+            return Err(ProgramError(format!(
+                "expected {} input(s), got {}",
+                self.sig.params.len(),
+                inputs.len()
+            )));
+        }
+
+        let mut frame: Vec<Value> = Vec::with_capacity(inputs.len() + self.locals.len());
+        frame.extend(inputs.iter().cloned().map(Value::Int));
+        frame.extend(
+            self.locals
+                .iter()
+                .map(|_| Value::Int(FheInt32::encrypt_trivial(0i32))),
+        );
+
+        let mut stack: Vec<Value> = Vec::new();
 
         for op in &self.body {
             match op {
                 CircuitOp::LocalGet(index) => {
-                    let value = inputs
-                        .get(*index as usize)
-                        .ok_or_else(|| ProgramError("input index out of bounds".into()))?
-                        .clone();
-                    stack.push(value);
+                    stack.push(local(&frame, *index)?.clone());
                 }
+                CircuitOp::LocalSet(index) => {
+                    let value = pop(&mut stack)?;
+                    *local_mut(&mut frame, *index)? = value;
+                }
+                CircuitOp::LocalTee(index) => {
+                    // `local.tee` writes the value but leaves it on the stack.
+                    let value = stack
+                        .last()
+                        .ok_or_else(|| ProgramError("stack underflow".into()))?
+                        .clone();
+                    *local_mut(&mut frame, *index)? = value;
+                }
+                CircuitOp::Const(value) => {
+                    stack.push(Value::Int(FheInt32::encrypt_trivial(*value)));
+                }
+                CircuitOp::Drop => {
+                    pop(&mut stack)?;
+                }
+
                 CircuitOp::Add => {
-                    let (a, b) = pop2(&mut stack)?;
-                    stack.push(&a + &b);
+                    let (a, b) = pop2_int(&mut stack)?;
+                    stack.push(Value::Int(&a + &b));
                 }
                 CircuitOp::Mul => {
-                    let (a, b) = pop2(&mut stack)?;
-                    stack.push(&a * &b);
+                    let (a, b) = pop2_int(&mut stack)?;
+                    stack.push(Value::Int(&a * &b));
                 }
                 CircuitOp::Sub => {
-                    let (a, b) = pop2(&mut stack)?;
-                    stack.push(&a - &b);
+                    let (a, b) = pop2_int(&mut stack)?;
+                    stack.push(Value::Int(&a - &b));
+                }
+
+                CircuitOp::Eq => {
+                    let (a, b) = pop2_int(&mut stack)?;
+                    stack.push(Value::Bool(a.eq(&b)));
+                }
+                CircuitOp::Ne => {
+                    let (a, b) = pop2_int(&mut stack)?;
+                    stack.push(Value::Bool(a.ne(&b)));
+                }
+                CircuitOp::Eqz => {
+                    let a = pop(&mut stack)?.into_int();
+                    stack.push(Value::Bool(a.eq(0i32)));
+                }
+                CircuitOp::Lt => {
+                    let (a, b) = pop2_int(&mut stack)?;
+                    stack.push(Value::Bool(a.lt(&b)));
+                }
+                CircuitOp::Gt => {
+                    let (a, b) = pop2_int(&mut stack)?;
+                    stack.push(Value::Bool(a.gt(&b)));
+                }
+                CircuitOp::Le => {
+                    let (a, b) = pop2_int(&mut stack)?;
+                    stack.push(Value::Bool(a.le(&b)));
+                }
+                CircuitOp::Ge => {
+                    let (a, b) = pop2_int(&mut stack)?;
+                    stack.push(Value::Bool(a.ge(&b)));
+                }
+
+                CircuitOp::Select => {
+                    // WASM pushes the candidates first and the condition last,
+                    // and yields the first candidate when the condition is true.
+                    let condition = pop(&mut stack)?.into_bool();
+                    let (if_true, if_false) = pop2_int(&mut stack)?;
+                    stack.push(Value::Int(condition.if_then_else(&if_true, &if_false)));
                 }
             }
         }
 
         if stack.len() != 1 {
-            return Err(ProgramError("invalid stack result".into()));
+            return Err(ProgramError(format!(
+                "invalid stack result: expected 1 value, found {}",
+                stack.len()
+            )));
         }
 
-        Ok(stack.pop().expect("checked len"))
+        // The signature declares an i32 result, so a trailing comparison is
+        // widened back to WASM's integer view of a boolean.
+        Ok(stack.pop().expect("checked len").into_int())
     }
 }
 
@@ -107,6 +249,7 @@ impl DiscaProgram {
             .map(|func| DiscaFunction {
                 name: func.name.clone(),
                 sig: func.sig.clone(),
+                locals: func.locals.clone(),
                 body: func.circuit_sequence(),
             })
             .collect();
@@ -164,22 +307,50 @@ impl Function {
             .iter()
             .map(|instr| match instr {
                 Instr::LocalGet(idx) => CircuitOp::LocalGet(*idx),
+                Instr::LocalSet(idx) => CircuitOp::LocalSet(*idx),
+                Instr::LocalTee(idx) => CircuitOp::LocalTee(*idx),
+                Instr::I32Const(v) => CircuitOp::Const(*v),
+                Instr::Drop => CircuitOp::Drop,
                 Instr::I32Add => CircuitOp::Add,
                 Instr::I32Mul => CircuitOp::Mul,
                 Instr::I32Sub => CircuitOp::Sub,
+                Instr::I32Eq => CircuitOp::Eq,
+                Instr::I32Ne => CircuitOp::Ne,
+                Instr::I32Eqz => CircuitOp::Eqz,
+                Instr::I32LtS => CircuitOp::Lt,
+                Instr::I32GtS => CircuitOp::Gt,
+                Instr::I32LeS => CircuitOp::Le,
+                Instr::I32GeS => CircuitOp::Ge,
+                Instr::Select => CircuitOp::Select,
             })
             .collect()
     }
 }
 
-fn pop2(stack: &mut Vec<FheInt32>) -> Result<(FheInt32, FheInt32)> {
-    let b = stack
+fn pop(stack: &mut Vec<Value>) -> Result<Value> {
+    stack
         .pop()
-        .ok_or_else(|| ProgramError("stack underflow".into()))?;
-    let a = stack
-        .pop()
-        .ok_or_else(|| ProgramError("stack underflow".into()))?;
+        .ok_or_else(|| ProgramError("stack underflow".into()))
+}
+
+/// Pops two operands as integers. The returned pair is `(deeper, shallower)`,
+/// so `a op b` reads the same way the WASM source did.
+fn pop2_int(stack: &mut Vec<Value>) -> Result<(FheInt32, FheInt32)> {
+    let b = pop(stack)?.into_int();
+    let a = pop(stack)?.into_int();
     Ok((a, b))
+}
+
+fn local(frame: &[Value], index: u32) -> Result<&Value> {
+    frame
+        .get(index as usize)
+        .ok_or_else(|| ProgramError(format!("local index {index} out of bounds")))
+}
+
+fn local_mut(frame: &mut [Value], index: u32) -> Result<&mut Value> {
+    frame
+        .get_mut(index as usize)
+        .ok_or_else(|| ProgramError(format!("local index {index} out of bounds")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,9 +509,30 @@ fn parse_instructions(body: &wasmparser::FunctionBody<'_>) -> Result<Vec<Instr>>
     while !ops.eof() {
         match ops.read().map_err(to_err)? {
             Operator::LocalGet { local_index } => out.push(Instr::LocalGet(local_index)),
+            Operator::LocalSet { local_index } => out.push(Instr::LocalSet(local_index)),
+            Operator::LocalTee { local_index } => out.push(Instr::LocalTee(local_index)),
+            Operator::I32Const { value } => out.push(Instr::I32Const(value)),
+            Operator::Drop => out.push(Instr::Drop),
             Operator::I32Add => out.push(Instr::I32Add),
             Operator::I32Mul => out.push(Instr::I32Mul),
             Operator::I32Sub => out.push(Instr::I32Sub),
+            Operator::I32Eq => out.push(Instr::I32Eq),
+            Operator::I32Ne => out.push(Instr::I32Ne),
+            Operator::I32Eqz => out.push(Instr::I32Eqz),
+            Operator::I32LtS => out.push(Instr::I32LtS),
+            Operator::I32GtS => out.push(Instr::I32GtS),
+            Operator::I32LeS => out.push(Instr::I32LeS),
+            Operator::I32GeS => out.push(Instr::I32GeS),
+            Operator::Select => out.push(Instr::Select),
+            // The unsigned comparisons would need FheUint32 operands, but the
+            // IR models i32 as signed throughout. Rejecting is better than
+            // silently evaluating them with signed semantics.
+            Operator::I32LtU | Operator::I32GtU | Operator::I32LeU | Operator::I32GeU => {
+                return Err(ProgramError(
+                    "unsigned i32 comparisons are not supported; the IR treats i32 as signed"
+                        .into(),
+                ));
+            }
             Operator::End => {}
             other => {
                 return Err(ProgramError(format!("unsupported operator: {other:?}")));
@@ -416,6 +608,275 @@ mod tests {
         assert_eq!(
             program.functions[2].body,
             vec![Instr::LocalGet(0), Instr::LocalGet(1), Instr::I32Sub]
+        );
+    }
+
+    #[test]
+    fn parses_the_expanded_opcode_set() {
+        let wat = r#"
+        (module
+            (func $pick (param i32 i32) (result i32)
+              (local i32)
+              local.get 0
+              local.get 1
+              local.get 0
+              local.get 1
+              i32.gt_s
+              select
+              local.set 2
+              local.get 2
+            )
+            (export "pick" (func $pick))
+        )
+        "#;
+
+        let program = Program::from_wat(wat).unwrap();
+        let func = &program.functions[0];
+
+        assert_eq!(func.locals, vec![NumType::I32], "one declared local");
+        assert_eq!(
+            func.circuit_sequence(),
+            vec![
+                CircuitOp::LocalGet(0),
+                CircuitOp::LocalGet(1),
+                CircuitOp::LocalGet(0),
+                CircuitOp::LocalGet(1),
+                CircuitOp::Gt,
+                CircuitOp::Select,
+                CircuitOp::LocalSet(2),
+                CircuitOp::LocalGet(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_const_tee_and_drop() {
+        let wat = r#"
+        (module
+            (func $f (param i32) (result i32)
+              (local i32)
+              i32.const 42
+              local.tee 1
+              drop
+              local.get 0
+              i32.const -7
+              i32.add
+            )
+            (export "f" (func $f))
+        )
+        "#;
+
+        let func = &Program::from_wat(wat).unwrap().functions[0];
+        assert_eq!(
+            func.circuit_sequence(),
+            vec![
+                CircuitOp::Const(42),
+                CircuitOp::LocalTee(1),
+                CircuitOp::Drop,
+                CircuitOp::LocalGet(0),
+                CircuitOp::Const(-7),
+                CircuitOp::Add,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_unsigned_comparisons() {
+        let wat = r#"
+        (module
+            (func $f (param i32 i32) (result i32)
+              local.get 0
+              local.get 1
+              i32.lt_u
+            )
+        )
+        "#;
+
+        let err = Program::from_wat(wat).unwrap_err();
+        assert!(
+            err.to_string().contains("unsigned"),
+            "expected an unsigned-comparison error, got: {err}"
+        );
+    }
+}
+
+/// Executes circuits under real encryption and checks the plaintext results.
+///
+/// Parsing tests prove we read the right opcodes; these prove we evaluate them
+/// with the right semantics, which is where the WASM/FHE impedance mismatch
+/// (integer booleans vs `FheBool`, operand order on the stack) actually bites.
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+
+    use tfhe::prelude::{FheDecrypt, FheTryEncrypt};
+    use tfhe::{ClientKey, ConfigBuilder, generate_keys, set_server_key};
+
+    /// Holds the client key so a test can encrypt inputs and read results back.
+    /// Key generation is per-test because tfhe installs the server key in
+    /// thread-local storage and tests run on their own threads.
+    struct Harness {
+        client_key: ClientKey,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let (client_key, server_key) = generate_keys(ConfigBuilder::default().build());
+            set_server_key(server_key);
+            Self { client_key }
+        }
+
+        fn run(&self, wat: &str, name: &str, inputs: &[i32]) -> i32 {
+            let program = DiscaProgram::from_program(&Program::from_wat(wat).unwrap());
+            let func = program
+                .function(name)
+                .unwrap_or_else(|| panic!("no exported function named {name}"));
+
+            let encrypted: Vec<FheInt32> = inputs
+                .iter()
+                .map(|v| FheInt32::try_encrypt(*v, &self.client_key).expect("encrypt input"))
+                .collect();
+
+            func.run(&encrypted)
+                .expect("run circuit")
+                .decrypt(&self.client_key)
+        }
+    }
+
+    const MAX: &str = r#"
+    (module
+        (func $max (param i32 i32) (result i32)
+          local.get 0
+          local.get 1
+          local.get 0
+          local.get 1
+          i32.gt_s
+          select
+        )
+        (export "max" (func $max))
+    )
+    "#;
+
+    #[test]
+    fn compare_and_select_compute_max() {
+        let h = Harness::new();
+        // Operand order is the easy thing to get backwards, so check both
+        // directions and the tie.
+        assert_eq!(h.run(MAX, "max", &[3, 9]), 9);
+        assert_eq!(h.run(MAX, "max", &[9, 3]), 9);
+        assert_eq!(h.run(MAX, "max", &[5, 5]), 5);
+        assert_eq!(h.run(MAX, "max", &[-8, -2]), -2, "signed comparison");
+    }
+
+    #[test]
+    fn local_tee_writes_and_leaves_the_value_on_the_stack() {
+        let wat = r#"
+        (module
+            (func $twice (param i32) (result i32)
+              (local i32)
+              local.get 0
+              i32.const 10
+              i32.add
+              local.tee 1
+              local.get 1
+              i32.add
+            )
+            (export "twice" (func $twice))
+        )
+        "#;
+
+        let h = Harness::new();
+        assert_eq!(h.run(wat, "twice", &[4]), 28, "2 * (4 + 10)");
+        assert_eq!(h.run(wat, "twice", &[-5]), 10, "2 * (-5 + 10)");
+    }
+
+    #[test]
+    fn local_set_const_and_drop() {
+        let wat = r#"
+        (module
+            (func $g (param i32 i32) (result i32)
+              (local i32)
+              local.get 0
+              local.get 1
+              i32.sub
+              local.set 2
+              i32.const 999
+              drop
+              local.get 2
+            )
+            (export "g" (func $g))
+        )
+        "#;
+
+        let h = Harness::new();
+        // Subtraction also pins operand order: 7 - 2, not 2 - 7.
+        assert_eq!(h.run(wat, "g", &[7, 2]), 5);
+    }
+
+    #[test]
+    fn comparisons_widen_to_wasm_integer_booleans() {
+        let wat = r#"
+        (module
+            (func $lt (param i32 i32) (result i32)
+              local.get 0
+              local.get 1
+              i32.lt_s
+            )
+            (func $is_zero (param i32) (result i32)
+              local.get 0
+              i32.eqz
+            )
+            (export "lt" (func $lt))
+            (export "is_zero" (func $is_zero))
+        )
+        "#;
+
+        let h = Harness::new();
+        // A comparison left on the stack is the function's i32 result, so it
+        // has to come back as 1 or 0 rather than as an FheBool.
+        assert_eq!(h.run(wat, "lt", &[2, 7]), 1);
+        assert_eq!(h.run(wat, "lt", &[7, 2]), 0);
+        assert_eq!(h.run(wat, "is_zero", &[0]), 1);
+        assert_eq!(h.run(wat, "is_zero", &[3]), 0);
+    }
+
+    #[test]
+    fn arithmetic_on_a_comparison_result_coerces_it() {
+        // Counting pattern: sum of predicate results. Exercises the Bool -> Int
+        // coercion on the arithmetic path.
+        let wat = r#"
+        (module
+            (func $count (param i32 i32) (result i32)
+              local.get 0
+              i32.eqz
+              local.get 1
+              i32.eqz
+              i32.add
+            )
+            (export "count" (func $count))
+        )
+        "#;
+
+        let h = Harness::new();
+        assert_eq!(h.run(wat, "count", &[0, 0]), 2);
+        assert_eq!(h.run(wat, "count", &[0, 1]), 1);
+        assert_eq!(h.run(wat, "count", &[1, 1]), 0);
+    }
+
+    #[test]
+    fn rejects_a_wrong_input_count() {
+        let h = Harness::new();
+        let program = DiscaProgram::from_program(&Program::from_wat(MAX).unwrap());
+        let func = program.function("max").unwrap();
+
+        let one = vec![FheInt32::try_encrypt(1i32, &h.client_key).unwrap()];
+        // `unwrap_err` is unavailable here: ciphertexts have no `Debug`.
+        let Err(err) = func.run(&one) else {
+            panic!("a one-input call to a two-parameter circuit must fail");
+        };
+        assert!(
+            err.to_string().contains("expected 2 input(s), got 1"),
+            "got: {err}"
         );
     }
 }
