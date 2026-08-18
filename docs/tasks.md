@@ -46,7 +46,7 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
 
 ## Track 1 — Execution core (`primitives/`)
 
-- [ ] **1.1 Opcode expansion.** Add `I32Eq`, `I32Ne`, `I32LtS`, `I32GtS`,
+- [x] **1.1 Opcode expansion.** Add `I32Eq`, `I32Ne`, `I32LtS`, `I32GtS`,
       `I32GeS`, `I32LeS`, `Select`, `LocalSet`, `LocalTee`. FHE comparisons
       return `FheBool`, so `DiscaFunction::run` needs a stack value type that is
       either `FheInt32` or `FheBool` rather than today's `Vec<FheInt32>`.
@@ -58,14 +58,14 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
       touched by the size probe. Add encode/decode helpers at the crate edge;
       keep evaluation on decompressed values. Measured at 2.3 KB and ~1 ms per
       conversion, so this is pure plumbing.
-- [ ] **1.3 Locals as real storage.** `Function.locals` is parsed and then
-      discarded; `circuit_sequence()` maps `LocalGet(i)` straight to input index
-      `i`. Once `local.set` exists, the evaluator needs a locals frame distinct
-      from the input vector.
+- [x] **1.3 Locals as real storage.** Done alongside 1.1, which needed it:
+      `DiscaFunction` carries its declared locals and the evaluator builds a
+      frame of parameters followed by trivially encrypted zeros.
 - [ ] **1.4 Validate stack discipline at compile time.** `run()` errors at
       execution time on underflow. Cheaper to reject a malformed circuit when
       building `DiscaFunction` — and stack-depth-zero points are exactly what
-      Phase 2 partitioning (architecture.md §6) needs anyway.
+      Phase 2 partitioning (architecture.md §6) needs anyway. Becomes more
+      valuable once 4.1 starts feeding real compiler output through the parser.
 - [x] **1.5 Tests for the new opcodes** against plaintext reference semantics.
       Six execution tests run circuits under real encryption and check
       decrypted results.
