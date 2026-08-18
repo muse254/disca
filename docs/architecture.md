@@ -60,6 +60,32 @@ Hard consequences:
    (i32 add 22 s → 225 ms; mul 178 s → 2.04 s). Every earlier estimate in this
    document was made against debug numbers and understated what fits in a demo.
 
+## 2a. Program constraints (validated against rustc 1.96)
+
+The IR is a **straight-line circuit**: a linear `CircuitOp` sequence over an
+operand stack, with no control flow and no addressable memory. FHE cannot branch
+on an encrypted condition — a node holds ciphertexts and cannot learn which way
+a test went — so this is a property of the model, not a gap in the front end.
+
+Two consequences, both confirmed empirically by `committee-tally/` (see
+`primitives/tests/tally_circuit.rs`):
+
+1. **Programs must be compiled with optimizations on.** At `--release` rustc
+   flattens `if`/`else`, mutable accumulators, and fixed-size loops into
+   `select`, emitting exactly `local.get`, `local.tee`, `i32.gt_s`, `i32.add`
+   and `select` — all supported. The same source built with `--debug` is
+   *rejected*: unoptimized rustc spills locals to a linear-memory stack frame
+   via `global.get $__stack_pointer` and `i32.store`, which a circuit model has
+   no way to represent.
+2. **Idiomatic Rust is fine, within limits.** A `for` loop over a fixed-size
+   array unrolls completely; the loop-written and select-written tallies compile
+   to the same circuit. What will *not* work is anything whose trip count or
+   memory access depends on a runtime value: a loop over a slice of unknown
+   length, indexing by a computed offset, or heap allocation.
+
+The practical rule for demo programs: fixed arity, fixed-size data, no
+allocation, built in release.
+
 ## 3. Actors and trust model
 
 | Actor | Sees | Does not see | Trust assumption (demo) |
