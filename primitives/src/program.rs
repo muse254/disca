@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use tfhe::FheInt32;
 use wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef, ValType};
+use wincode::{SchemaRead, SchemaWrite};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramError(pub String);
@@ -18,12 +20,12 @@ impl Error for ProgramError {}
 
 type Result<T> = std::result::Result<T, ProgramError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub enum NumType {
     I32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct FuncSig {
     pub params: Vec<NumType>,
     pub results: Vec<NumType>,
@@ -37,7 +39,7 @@ pub enum Instr {
     I32Sub,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub enum CircuitOp {
     LocalGet(u32),
     Add,
@@ -45,7 +47,7 @@ pub enum CircuitOp {
     Sub,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct DiscaFunction {
     pub name: Option<String>,
     pub sig: FuncSig,
@@ -92,6 +94,8 @@ impl DiscaFunction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscaProgram {
     functions: Vec<DiscaFunction>,
+    /// Cursor for the [`Iterator`] impl. Iteration progress is not part of the
+    /// program's identity and is excluded from its bytecode hash.
     next_index: usize,
 }
 
@@ -108,12 +112,29 @@ impl DiscaProgram {
             })
             .collect();
 
+        Self::from_functions(functions)
+    }
+
+    /// Creates a program directly from lowered functions, as when decoding
+    /// bytecode received over the wire.
+    pub fn from_functions(functions: Vec<DiscaFunction>) -> Self {
         Self {
             functions,
             next_index: 0,
         }
     }
 
+    /// The program's functions, in declaration order.
+    pub fn functions(&self) -> &[DiscaFunction] {
+        &self.functions
+    }
+
+    /// Looks up an exported function by name.
+    pub fn function(&self, name: &str) -> Option<&DiscaFunction> {
+        self.functions
+            .iter()
+            .find(|f| f.name.as_deref() == Some(name))
+    }
 }
 
 impl Iterator for DiscaProgram {

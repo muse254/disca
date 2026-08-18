@@ -19,19 +19,19 @@ recorded there.
 | Data | Placement | Why |
 |---|---|---|
 | Program bytecode (DISCA ops) | Off-chain store; `keccak256` hash on-chain | Arbitrary size; nodes need the full circuit |
-| Server key (~120 MB) | Off-chain (coordinator-served, workers pull by hash); `keccak256` on-chain | Impossible on-chain |
-| Client key (~24 KB, secret) | Key holder only, never transmitted | It is the privacy boundary |
-| Input ciphertexts | `CompressedFheInt32` (~1.6 KB/value) in calldata/event; `keccak256` commitment in storage | Calldata-viable; on-chain availability proves inputs unchanged |
-| Working ciphertexts (~263 KB/value, decompressed) | Node memory only | ~4.2M gas/value on-chain; pointless |
+| Server key (114.8 MB, or 28.8 MB compressed) | Off-chain (coordinator-served compressed, workers pull by hash); `keccak256` on-chain | Impossible on-chain |
+| Client key (23.5 KB, secret) | Key holder only, never transmitted | It is the privacy boundary |
+| Input ciphertexts | `CompressedFheInt32` (2.3 KB/value) in calldata/event; `keccak256` commitment in storage | Calldata-viable; on-chain availability proves inputs unchanged |
+| Working ciphertexts (257.9 KB/value, decompressed) | Node memory only | ~4.1M gas/value on-chain; pointless |
 | Result ciphertext | Coordinator-held; `keccak256` on-chain; compressed form optionally emitted like inputs | Key holder fetches off-chain and decrypts locally |
 | Escrow, job state, attester set | On-chain | It is the settlement layer |
 
 Gas sketch for a 3-input job (L1 constants; cheaper on L2):
 
-- Input blobs via event data: 3 x 1.6 KB x ~8 gas/byte = ~40k gas
+- Input blobs via event data: 3 x 2.3 KB x ~8 gas/byte = ~57k gas
 - Commitments in storage: 3 x 32 B slots = ~60k gas
-- `fulfillJob` (result hash + attester list + compressed result blob ~1.6 KB):
-  order 50-100k gas
+- `fulfillJob` (result hash + attester list + compressed result blob 2.3 KB):
+  order 70-120k gas
 
 Total well under a typical DeFi transaction. Demo is cheap even on L1 testnet.
 
@@ -98,12 +98,13 @@ Design notes:
 One program, one keypair (demo model):
 
 1. Key holder runs `disca-cli keygen --program <bytecode>` producing
-   (client key, server key) locally. ~7 s measured.
-2. Server key (~120 MB) is pushed to the coordinator off-band; coordinator
-   exposes it at `GET /keys/<serverKeyHash>` for workers to pull.
+   (client key, server key) locally. 685 ms measured in release.
+2. Server key is compressed (28.8 MB, 438 ms) and pushed to the coordinator
+   off-band; coordinator exposes it at `GET /keys/<serverKeyHash>` for workers
+   to pull. Workers decompress once at startup.
 3. `registerProgram(bytecodeHash, serverKeyHash, M)` pins both hashes on-chain.
 4. Key holder encrypts inputs with the client key into
-   `CompressedFheInt32` blobs (~1.6 KB each) - these are the only bytes that
+   `CompressedFheInt32` blobs (2.3 KB each) - these are the only bytes that
    ever cross the bridge.
 5. Nodes decompress with the server key, evaluate, and the coordinator
    re-compresses the result for the return trip.
@@ -111,7 +112,7 @@ One program, one keypair (demo model):
 
 Explicitly rejected for the demo:
 
-- **Public-key encryption mode** (~2.1 GB key measured): unusable. Multi-party
+- **Public-key encryption mode** (2.00 GB key measured): unusable. Multi-party
   inputs from mutually distrusting parties therefore require multi-key or
   threshold FHE - roadmap, alongside Zama-style threshold KMS.
 - **Server key on-chain or in IPFS-as-only-source**: too large for the former;

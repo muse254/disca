@@ -18,21 +18,31 @@ bridge contract plus a chain watcher — not a change to the execution core.
 Pitch: *"Ethereum contracts can't keep secrets. DISCA lets a contract request
 computation over data that no node, validator, or observer ever sees."*
 
-## 2. Measured constraints (tfhe-rs 1.5.0, default params, debug build)
+## 2. Measured constraints (tfhe-rs 1.5.0, default params, **release** build)
 
-These numbers drive every placement decision below. Re-measure in release mode
-during hackathon week 1 (release is typically 10–100x faster for evaluation).
+Reproduce with `cargo run --release -p primitives --example size_probe`
+(add `--public-key` for the public-key measurement, which is slow and
+memory-hungry). Sizes are `safe_serialize` wire sizes, not in-memory footprints.
 
 | Artifact | Size / latency | Consequence |
 |---|---|---|
-| Client key (secret) | ~24 KB | Lives exclusively with the key holder. Never transmitted. |
-| Server key (public eval key) | ~120 MB | Cannot go on-chain. Distributed to nodes out-of-band, registered on-chain by hash. |
-| Public key (public-key encryption mode) | ~2.1 GB | **Impractical. Public-key mode is out of scope.** Multi-party input requires multi-key/threshold FHE → roadmap. |
-| `FheInt32` ciphertext (uncompressed) | ~263 KB | Too big for calldata (~4.2M gas/value). Only exists inside the node network. |
-| `CompressedFheInt32` ciphertext | ~1.6 KB | Calldata-viable (~26k gas on L1, cheaper on L2). **This is the on-chain wire format.** |
-| Key generation | ~7 s | Per-program keygen is cheap enough to do at registration time. |
-| i32 add (debug) | ~22 s | Demo circuits must be small; build demos in release mode. |
-| i32 mul (debug) | ~178 s | Avoid multiplication in demo circuits; prefer compare/select patterns. |
+| Client key (secret) | 23.5 KB | Lives exclusively with the key holder. Never transmitted. |
+| Server key (public eval key) | 114.8 MB | Cannot go on-chain. Distributed to nodes out-of-band, registered on-chain by hash. |
+| Server key (compressed) | **28.8 MB** | 4x smaller; compresses in 438 ms. **This is what the coordinator should serve to workers.** |
+| Public key (public-key encryption mode) | 2.00 GB | **Impractical. Public-key mode is out of scope.** Multi-party input requires multi-key/threshold FHE → roadmap. |
+| `FheInt32` ciphertext (uncompressed) | 257.9 KB | Too big for calldata (~4.1M gas/value). Only exists inside the node network. |
+| `CompressedFheInt32` ciphertext | 2.3 KB | Calldata-viable (~38k gas on L1, cheaper on L2). **This is the on-chain wire format.** Compress/decompress ~1 ms each — negligible. |
+| `FheBool` (comparison result) | 16.2 KB | Intermediate only; never crosses the boundary. |
+| Key generation | 685 ms | Per-program keygen is effectively free; do it at registration time. |
+| i32 add | 225 ms | |
+| i32 sub | 265 ms | |
+| i32 mul | 2.04 s | ~9x an add. Still worth avoiding in hot loops, but no longer disqualifying. |
+| i32 compare (`gt`) | 141 ms | Cheapest op measured. |
+| `select` (`if_then_else`) | 200 ms | |
+
+A compare+select pair costs ~341 ms, so a tally over N candidates (N-1 pairs)
+runs in roughly `(N-1) x 0.34 s` — a 16-candidate tally is ~5 s of evaluation.
+Circuit size is not a binding constraint on the demo.
 
 Hard consequences:
 
@@ -41,10 +51,14 @@ Hard consequences:
    inputs from mutually distrusting parties require multi-key FHE — explicitly
    future work (cf. Zama's threshold-KMS approach).
 2. **Compressed ciphertexts at the boundary, uncompressed inside.** Clients submit
-   `CompressedFheInt32`; nodes decompress server-side before evaluation.
+   `CompressedFheInt32`; nodes decompress server-side before evaluation. At ~1 ms
+   per conversion this costs nothing.
 3. **Privacy guarantee = data privacy only.** Nodes and the chain never see input
    or output plaintext. The *algorithm* (DISCA bytecode) is visible to executing
    nodes; algorithm privacy is roadmap (private function evaluation).
+4. **Always build and demo in release.** Debug is 87–98x slower on evaluation
+   (i32 add 22 s → 225 ms; mul 178 s → 2.04 s). Every earlier estimate in this
+   document was made against debug numbers and understated what fits in a demo.
 
 ## 3. Actors and trust model
 
