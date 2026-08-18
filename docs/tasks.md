@@ -63,7 +63,10 @@ Cheap, unblocks estimation, and none of it burns hackathon hours.
       result, so `fulfillJob` can verify `keccak256(resultBlob) == resultHash`
       and a coordinator cannot pair a real attestation with a substituted blob.
       Emitting the result blob on-chain becomes required rather than optional.
-      Reasoning in bridge.md §5a.
+      Reasoning, cost, and the fallback (option C) in bridge.md §5a.
+- [ ] **1.2b Revisit 1.2a if results stop being single-valued.** 11.8 KB is the
+      cost of one `i32`; calldata grows linearly with output count, and ~10
+      values would already be too large for an ordinary transaction.
 - [x] **1.3 Locals as real storage.** Done alongside 1.1, which needed it:
       `DiscaFunction` carries its declared locals and the evaluator builds a
       frame of parameters followed by trivially encrypted zeros.

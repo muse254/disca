@@ -203,10 +203,37 @@ well as evaluation. Two points make that acceptable:
 `primitives::wire::SealedResult` bundles the blob with its hash so the two
 cannot be handled separately.
 
-The choice is not free: it requires emitting an 11.8 KB blob, roughly 100-200k
-gas that option A could have skipped. On the Anvil and L2 targets in §7 that is
-negligible, and on L1 it keeps `fulfillJob` within an ordinary transaction, so
-the guarantee is worth paying for.
+### What B costs, and when to revisit it
+
+Emitting the blob costs roughly 100-200k gas that option A would have skipped.
+On the Anvil and L2 targets in §7 that is zero or cents, and on L1 it keeps
+`fulfillJob` within the range of an ordinary transaction (a Uniswap V3 swap is
+~150k), so the guarantee is worth paying for today.
+
+**The constraint to watch: 11.8 KB is the cost of a single `i32` result.**
+Results are compressed ciphertexts, so calldata grows linearly with the number
+of output values. A job returning ten values would carry ~118 KB, which is not
+an ordinary transaction on any chain. B holds while results stay small; it is
+not a design that scales to large outputs.
+
+If that changes — multi-value results, ranked outputs, anything beyond a handful
+of ciphertexts — the fallback is:
+
+**Option C: attest to `keccak256(compressed result)` as in B, but do not emit
+the blob.** The key holder fetches it from the coordinator and checks the hash
+against the on-chain value themselves. That keeps A's gas cost and most of B's
+verifiability. What it gives up is atomicity: the key holder can *detect*
+substitution but cannot prove on-chain which blob they were handed, so escrow
+still releases before result availability is established. C is right only once
+gas becomes binding, which it is not at present.
+
+The three options in one line each:
+
+| | Contract can verify blob | Escrow release atomic with availability | `fulfillJob` gas |
+|---|---|---|---|
+| A | no | no | ~70-120k |
+| B (current) | yes | yes | ~250-350k |
+| C | no (key holder can) | no | ~70-120k |
 
 **Consequence for §1:** emitting the compressed result on-chain is now
 *required*, not optional. The guarantee is the contract checking the emitted
