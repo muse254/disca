@@ -9,3 +9,5 @@ homepage.workspace = true
 [dependencies]
 tfhe = { workspace = true }
 primitives = { path = "../primitives" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

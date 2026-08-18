@@ -86,9 +86,11 @@ mod tests {
             }
         }
 
-        eprintln!(
-            "half_adder_truth_table: key_setup={t_keys:?}, eval+decrypt cases={cases} in {:?}",
-            t_eval.elapsed()
+        tracing::info!(
+            key_setup_ms = t_keys.as_millis(),
+            cases,
+            eval_ms = t_eval.elapsed().as_millis(),
+            "half_adder truth table verified"
         );
     }
 
@@ -123,9 +125,11 @@ mod tests {
             }
         }
 
-        eprintln!(
-            "full_adder_truth_table: key_setup={t_keys:?}, eval+decrypt cases={cases} in {:?}",
-            t_eval.elapsed()
+        tracing::info!(
+            key_setup_ms = t_keys.as_millis(),
+            cases,
+            eval_ms = t_eval.elapsed().as_millis(),
+            "full_adder truth table verified"
         );
     }
 }
