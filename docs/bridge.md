@@ -167,6 +167,26 @@ plain `reveal(winner)` marked as a trusted reveal in the demo script. Judges
 see: private inputs committed on-chain, distributed FHE execution attested
 2-of-3, settlement, and an explicit trust boundary at reveal time.
 
+## 5a. Which bytes the result hash covers
+
+`primitives/src/wire.rs` hashes the **uncompressed** result ciphertext, so
+attestation depends only on evaluation being deterministic — the property
+`architecture.md` §3 claims and `results_are_deterministic` verifies.
+
+Compression turns out to be deterministic too (measured; pinned by
+`compression_is_not_relied_on_being_deterministic`). That makes a stronger
+variant available, and it is worth deciding deliberately before `fulfillJob`
+is written:
+
+| Option | `resultHash` covers | Consequence |
+|---|---|---|
+| **A — current** | uncompressed result | Attestation rests only on evaluation determinism. The contract stores a hash it cannot check against the `resultBlob` it emits. |
+| **B** | compressed result | The contract can verify `keccak256(resultBlob) == resultHash` on-chain, so the emitted blob is provably the attested one. Costs a dependency on compression determinism, which tfhe does not document as a guarantee. |
+
+B is the better on-chain property; A is the safer assumption. Leaning A for the
+first implementation, with the canary test to tell us if B's precondition ever
+breaks.
+
 ## 6. Failure modes
 
 | Failure | Handling (demo) |

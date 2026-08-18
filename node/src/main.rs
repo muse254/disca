@@ -12,9 +12,9 @@
 
 use std::time::Instant;
 
-use primitives::bytecode;
 use primitives::program::{DiscaProgram, Program};
-use tfhe::prelude::{FheDecrypt, FheTryEncrypt};
+use primitives::{bytecode, wire};
+use tfhe::prelude::FheDecrypt;
 use tfhe::{ConfigBuilder, FheInt32, generate_keys, set_server_key};
 use tracing::{Level, info, info_span, warn};
 use tracing_subscriber::EnvFilter;
@@ -61,16 +61,35 @@ fn main() {
     };
     set_server_key(server_key);
 
-    let (a, b) = {
+    // Inputs cross the boundary compressed and committed, exactly as they will
+    // when they arrive as calldata rather than as local values.
+    let inputs: Vec<FheInt32> = {
         let _span = info_span!("inputs.encrypt", count = 2).entered();
         let started = Instant::now();
-        let a = FheInt32::try_encrypt(4i32, &client_key).expect("encrypt a");
-        let b = FheInt32::try_encrypt(7i32, &client_key).expect("encrypt b");
+
+        let expanded = [4i32, 7i32]
+            .iter()
+            .map(|value| {
+                let compressed = wire::encrypt_input(*value, &client_key).expect("encrypt input");
+                let encoded = wire::encode_input(&compressed).expect("encode input");
+                let commit = wire::commitment(&encoded);
+
+                info!(
+                    bytes = encoded.len(),
+                    commitment = %bytecode::hex(&commit),
+                    "input committed"
+                );
+
+                let received = wire::decode_input(&encoded).expect("decode input");
+                wire::decompress(&received)
+            })
+            .collect();
+
         info!(
             elapsed_ms = started.elapsed().as_millis(),
             "inputs encrypted"
         );
-        (a, b)
+        expanded
     };
 
     for func in program {
@@ -84,11 +103,17 @@ fn main() {
         let _enter = span.enter();
         let started = Instant::now();
 
-        match func.run(&[a.clone(), b.clone()]) {
+        match func.run(&inputs) {
             Ok(output) => {
-                let value: i32 = output.decrypt(&client_key);
+                // The hash a worker would report for M-of-N attestation, and
+                // the compressed blob the key holder would fetch and decrypt.
+                let attestation = wire::result_hash(&output).expect("hash result");
+                let returned = wire::compress_result(&output);
+                let value: i32 = wire::decompress(&returned).decrypt(&client_key);
+
                 info!(
                     result = value,
+                    result_hash = %bytecode::hex(&attestation),
                     elapsed_ms = started.elapsed().as_millis(),
                     "function evaluated"
                 );
