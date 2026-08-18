@@ -201,6 +201,21 @@ involved.
       convincing thing in the eventual demo video.
 - [x] Assert the key holder decrypts the expected plaintext at the end.
 
+### 2.9 Fallout from the determinism finding
+
+- [x] **2.9a Pin worker evaluation to one thread.** Multi-threaded tfhe-rs
+      evaluation is not bit-reproducible, so honest workers disagreed and jobs
+      failed to settle. `pin_evaluation_to_one_thread` in the worker role.
+      Written up in architecture.md §3.
+- [ ] **2.9b Re-measure the circuit-size budget single-threaded.** §2's
+      latencies were measured multi-threaded and are now optimistic by ~3x. The
+      demo circuit still fits, but the headroom claim in §2 needs restating.
+- [ ] **2.9c Treat this as the case for L1.** Byte-equality attestation is what
+      forces single-threaded evaluation. An optimistic challenge window
+      (architecture.md §7, L1) verifies computation instead, and would give
+      workers their cores back. Worth raising in the write-up as the reason the
+      ladder exists.
+
 ## Track 3 — Bridge (`bridge/`, new Foundry project) — needs 0.3
 
 - [ ] **3.1 Foundry scaffold** + `DiscaBridge.sol`: program registry, worker

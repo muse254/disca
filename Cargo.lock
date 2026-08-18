@@ -638,6 +638,7 @@ version = "0.2.0"
 dependencies = [
  "clap",
  "primitives",
+ "rayon",
  "tfhe",
  "tiny_http",
  "tracing",
@@ -716,6 +717,7 @@ name = "primitives"
 version = "0.2.0"
 dependencies = [
  "bincode",
+ "rayon",
  "serde",
  "sha3",
  "tfhe",

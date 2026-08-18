@@ -97,18 +97,42 @@ allocation, built in release.
 | Worker nodes | Ciphertexts, circuit segment | Plaintext | ≤ threshold may lie about results; M-of-N attestation catches it |
 | Chain / observers | Commitments, bytecode hash, result commitment | Plaintext | — |
 
-**Deterministic evaluation property:** tfhe-rs evaluation *and* compression are
-deterministic given the same input ciphertexts (randomness exists only at
-encryption time). Two honest workers executing the same circuit on the same
-inputs produce *byte-identical* compressed result ciphertexts. This makes M-of-N
-result-hash matching a meaningful, cheap correctness check without any ZK
-machinery.
+**Deterministic evaluation property — conditional.** Two honest workers
+executing the same circuit on the same input ciphertexts produce *byte-identical*
+compressed results, which is what makes M-of-N result-hash matching a
+meaningful, cheap correctness check without any ZK machinery.
 
-Both halves are verified rather than assumed — `results_are_deterministic` and
-`compression_is_deterministic` in `primitives/src/wire.rs`. Compression is
-included because the attested hash covers the compressed blob, which is what
-lets the bridge contract verify the ciphertext it emits against the attestation
-(see bridge.md §5a).
+**That holds only when evaluation is single-threaded.** tfhe-rs multi-threaded
+evaluation is *not* bit-reproducible: the same circuit over the same ciphertexts
+yields results that decrypt identically but differ byte for byte, because the
+noise drawn during evaluation depends on how the work was split across threads.
+Pinning the thread count does not fix it — measured with `RAYON_NUM_THREADS=4`,
+three concurrent processes given byte-identical inputs still diverged. Only one
+thread is reproducible.
+
+This was found by running three workers concurrently, not by reading: honest
+workers intermittently disagreed and no job settled. Reproduce it with
+`primitives/examples/cross_process.rs`.
+
+Consequences:
+
+1. **Workers must evaluate single-threaded.** `node`'s worker role pins the
+   global rayon pool to one thread at startup
+   (`pin_evaluation_to_one_thread`). It is a correctness requirement, not a
+   tuning knob.
+2. **It costs about 3x.** A compare-and-select circuit went from 0.65 s to
+   2.14 s on 8 cores. Evaluation is now bounded by single-core speed, so the
+   circuit-size headroom in §2 shrinks accordingly.
+3. **This is the strongest argument for climbing the ladder in §7.** L1
+   (optimistic challenge) and L2 (ZK proof of correct evaluation) verify
+   *computation* rather than byte equality, and would let workers use every
+   core they have.
+
+Compression is deterministic and remains so (`compression_is_deterministic`);
+the attested hash covers the compressed blob so the bridge contract can verify
+the ciphertext it emits (bridge.md §5a). Evaluation determinism is pinned by
+`results_are_deterministic` and, under concurrency, by
+`primitives/tests/determinism_under_concurrency.rs`.
 
 ## 4. System overview
 

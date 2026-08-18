@@ -11,6 +11,7 @@ tfhe = { workspace = true }
 primitives = { path = "../primitives" }
 clap = { workspace = true, features = ["derive"] }
 wincode = { workspace = true }
+rayon = { workspace = true }
 tiny_http = { workspace = true }
 ureq = { workspace = true }
 tracing = { workspace = true }

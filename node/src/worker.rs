@@ -37,8 +37,35 @@ pub struct Config {
     pub behaviour: Behaviour,
 }
 
+/// Pins evaluation to a single thread.
+///
+/// **This is a correctness requirement, not a tuning knob.** tfhe-rs
+/// multi-threaded evaluation is not bit-reproducible: the same circuit over the
+/// same ciphertexts, evaluated with more than one thread, yields results that
+/// decrypt identically but differ byte for byte. M-of-N attestation compares
+/// hashes of those bytes, so two honest workers would disagree and no job would
+/// ever settle.
+///
+/// Measured: pinning to one thread costs roughly 3x on evaluation
+/// (0.65 s to 2.14 s for a compare-and-select circuit on 8 cores). That is the
+/// price of a result two workers can independently arrive at. Lifting it needs
+/// a verification scheme that does not depend on byte equality — the L1/L2 rungs
+/// in `architecture.md` §7.
+fn pin_evaluation_to_one_thread() {
+    if let Err(error) = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build_global()
+    {
+        // Only fails if something already initialised the pool, which would
+        // mean evaluation is about to be non-reproducible.
+        warn!(%error, "could not pin evaluation to one thread; results may not be reproducible");
+    }
+}
+
 /// Runs the worker until the process is killed.
 pub fn run(config: Config) -> Result<(), String> {
+    pin_evaluation_to_one_thread();
+
     let server = tiny_http::Server::http(&config.bind)
         .map_err(|e| format!("cannot bind {}: {e}", config.bind))?;
 
