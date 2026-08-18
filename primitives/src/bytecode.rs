@@ -10,14 +10,19 @@
 //!
 //! * A magic-and-version header, so a format change is a loud deserialization
 //!   failure rather than a silently different hash.
-//! * bincode with fixed-width integers and explicit little-endian byte order,
-//!   rather than bincode's varint encoding, so the bytes do not depend on the
+//! * A fixed-width, little-endian encoding, so the bytes do not depend on the
 //!   host or on how the values happen to be laid out.
+//!
+//! The encoder is [`wincode`], which reproduces bincode 1.x's default wire
+//! format (little-endian, fixed-width integers) from its own `SchemaWrite` /
+//! `SchemaRead` derives. That byte-compatibility is load-bearing here, so
+//! `matches_bincode_byte_for_byte` below pins it against bincode directly
+//! rather than taking the claim on trust; bincode is retained as a
+//! dev-dependency for exactly that check.
 //!
 //! Only the function list is encoded. Iteration state on [`DiscaProgram`] is a
 //! cursor, not program content, and must never affect the hash.
 
-use bincode::Options;
 use sha3::{Digest, Keccak256};
 
 use crate::program::{DiscaFunction, DiscaProgram, ProgramError};
@@ -35,25 +40,15 @@ pub const BYTECODE_VERSION: u16 = 1;
 /// Length of the fixed header: magic (4) + version (2).
 const HEADER_LEN: usize = 6;
 
-/// The bincode configuration, pinned explicitly. bincode's defaults have
-/// changed between major versions; relying on them would make the on-chain
-/// hash a function of our dependency graph.
-fn codec() -> impl Options {
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_little_endian()
-        .reject_trailing_bytes()
-}
-
 /// Encodes a program into its canonical bytecode representation.
 pub fn serialize(program: &DiscaProgram) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(HEADER_LEN + 64);
+    let body = wincode::serialize(program.functions())
+        .map_err(|e| ProgramError(format!("failed to encode bytecode: {e:?}")))?;
+
+    let mut out = Vec::with_capacity(HEADER_LEN + body.len());
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&BYTECODE_VERSION.to_le_bytes());
-
-    codec()
-        .serialize_into(&mut out, program.functions())
-        .map_err(|e| ProgramError(format!("failed to encode bytecode: {e}")))?;
+    out.extend_from_slice(&body);
 
     Ok(out)
 }
@@ -75,9 +70,11 @@ pub fn deserialize(bytes: &[u8]) -> Result<DiscaProgram> {
         )));
     }
 
-    let functions: Vec<DiscaFunction> = codec()
-        .deserialize(&bytes[HEADER_LEN..])
-        .map_err(|e| ProgramError(format!("failed to decode bytecode: {e}")))?;
+    // `deserialize_exact` rejects trailing bytes. A worker must not accept a
+    // blob whose tail it ignored: it would execute one thing and attest to the
+    // hash of another.
+    let functions: Vec<DiscaFunction> = wincode::deserialize_exact(&bytes[HEADER_LEN..])
+        .map_err(|e| ProgramError(format!("failed to decode bytecode: {e:?}")))?;
 
     Ok(DiscaProgram::from_functions(functions))
 }
@@ -210,6 +207,30 @@ mod tests {
         let mut wrong_version = serialize(&sample()).unwrap();
         wrong_version[4] = 0xff;
         assert!(deserialize(&wrong_version).is_err(), "bad version");
+    }
+
+    #[test]
+    fn matches_bincode_byte_for_byte() {
+        // wincode is used for its speed and its audited, fuzzed decoder, but
+        // the value we take from it here is its wire format: the encoding feeds
+        // an on-chain hash, so a silent divergence from bincode 1.x's default
+        // format would change every registered program's identity. Assert the
+        // compatibility rather than trusting the README.
+        use bincode::Options;
+
+        let program = sample();
+
+        let via_wincode = wincode::serialize(program.functions()).unwrap();
+        let via_bincode = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .serialize(program.functions())
+            .unwrap();
+
+        assert_eq!(
+            via_wincode, via_bincode,
+            "wincode diverged from bincode 1.x default encoding"
+        );
     }
 
     #[test]
