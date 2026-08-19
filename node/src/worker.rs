@@ -37,35 +37,16 @@ pub struct Config {
     pub behaviour: Behaviour,
 }
 
-/// Pins evaluation to a single thread.
-///
-/// **This is a correctness requirement, not a tuning knob.** tfhe-rs
-/// multi-threaded evaluation is not bit-reproducible: the same circuit over the
-/// same ciphertexts, evaluated with more than one thread, yields results that
-/// decrypt identically but differ byte for byte. M-of-N attestation compares
-/// hashes of those bytes, so two honest workers would disagree and no job would
-/// ever settle.
-///
-/// Measured: pinning to one thread costs roughly 3x on evaluation
-/// (0.65 s to 2.14 s for a compare-and-select circuit on 8 cores). That is the
-/// price of a result two workers can independently arrive at. Lifting it needs
-/// a verification scheme that does not depend on byte equality — the L1/L2 rungs
-/// in `architecture.md` §7.
-fn pin_evaluation_to_one_thread() {
-    if let Err(error) = rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .build_global()
-    {
-        // Only fails if something already initialised the pool, which would
-        // mean evaluation is about to be non-reproducible.
-        warn!(%error, "could not pin evaluation to one thread; results may not be reproducible");
-    }
-}
-
 /// Runs the worker until the process is killed.
+///
+/// **Known unsound:** M-of-N attestation compares hashes of result ciphertext
+/// bytes, and tfhe-rs evaluation is not byte-reproducible. Two honest workers
+/// given identical keys and identical inputs intermittently produce results
+/// that decrypt to the same value but differ byte for byte, so jobs fail to
+/// reach agreement at random. Restricting evaluation to a single thread was
+/// tried and does not fix it. The attestation scheme needs a foundation other
+/// than byte equality before this is dependable — see `architecture.md` §3.
 pub fn run(config: Config) -> Result<(), String> {
-    pin_evaluation_to_one_thread();
-
     let server = tiny_http::Server::http(&config.bind)
         .map_err(|e| format!("cannot bind {}: {e}", config.bind))?;
 
@@ -153,6 +134,7 @@ fn spawn_evaluator(config: &Config, rx: Receiver<JobDispatch>) -> thread::JoinHa
                         &coordinator,
                         JobReport {
                             job_id: dispatch.job_id,
+                            attestation_token: dispatch.attestation_token,
                             worker: id.clone(),
                             outcome: JobOutcome::Evaluated(sealed),
                             elapsed_ms,
@@ -174,6 +156,7 @@ fn spawn_evaluator(config: &Config, rx: Receiver<JobDispatch>) -> thread::JoinHa
 fn failure(dispatch: &JobDispatch, id: &str, reason: String, elapsed_ms: u64) -> JobReport {
     JobReport {
         job_id: dispatch.job_id,
+        attestation_token: dispatch.attestation_token,
         worker: id.to_string(),
         outcome: JobOutcome::Failed(reason),
         elapsed_ms,

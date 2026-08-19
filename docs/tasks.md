@@ -201,20 +201,25 @@ involved.
       convincing thing in the eventual demo video.
 - [x] Assert the key holder decrypts the expected plaintext at the end.
 
-### 2.9 Fallout from the determinism finding
+### 2.10 Byte-equality attestation does not work — decide the replacement
 
-- [x] **2.9a Pin worker evaluation to one thread.** Multi-threaded tfhe-rs
-      evaluation is not bit-reproducible, so honest workers disagreed and jobs
-      failed to settle. `pin_evaluation_to_one_thread` in the worker role.
-      Written up in architecture.md §3.
-- [ ] **2.9b Re-measure the circuit-size budget single-threaded.** §2's
-      latencies were measured multi-threaded and are now optimistic by ~3x. The
-      demo circuit still fits, but the headroom claim in §2 needs restating.
-- [ ] **2.9c Treat this as the case for L1.** Byte-equality attestation is what
-      forces single-threaded evaluation. An optimistic challenge window
-      (architecture.md §7, L1) verifies computation instead, and would give
-      workers their cores back. Worth raising in the write-up as the reason the
-      ladder exists.
+tfhe-rs evaluation is not byte-reproducible. Honest workers given identical keys
+and inputs intermittently produce results that decrypt the same but differ byte
+for byte, so M-of-N on `keccak256(result)` fails at random. Single-threading was
+tried and rejected (worked on a 6-op circuit, not on the real 18-op one, ~3x
+cost). Evidence and options in architecture.md §3. **Pick one before Track 3
+commits the contract to a scheme.**
+
+- [ ] **2.10a Key-holder adjudication.** Key holder decrypts each result and
+      compares plaintexts. Sound and cheap; costs the contract-verifiable
+      property in bridge.md §5a and puts the key holder on every job's path.
+- [ ] **2.10b Deterministic evaluation.** Investigate whether tfhe's
+      `DeterministicSeeder` can seed the high-level evaluation path per job. If
+      so, byte equality returns and nothing else changes. Highest value if it
+      works; unknown whether it can.
+- [ ] **2.10c Pull L1 forward.** An optimistic challenge window verifies
+      computation rather than bytes. Was roadmap; this finding is the argument
+      for doing it now.
 
 ## Track 3 — Bridge (`bridge/`, new Foundry project) — needs 0.3
 

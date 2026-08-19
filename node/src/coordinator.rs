@@ -95,8 +95,22 @@ impl KeyHolder {
     }
 }
 
-/// Reports collected for the job in flight.
-type Inbox = Arc<Mutex<Vec<JobReport>>>;
+/// Reports collected for the job in flight, keyed by the worker each one is
+/// attributable to.
+///
+/// A map rather than a list, because agreement must be counted per worker: two
+/// reports from the same worker are one attestation, and a report that cannot
+/// be attributed to a dispatched worker is not an attestation at all.
+type Inbox = Arc<Mutex<HashMap<String, JobReport>>>;
+
+/// Resolves an attestation token to the worker the coordinator dispatched it
+/// to.
+///
+/// This is what makes a report attributable. The alternative — trusting the
+/// `worker` field a reporter puts in its own message — lets one worker report M
+/// times under M invented names and settle a job single-handedly, since nothing
+/// else distinguishes the reports.
+type Tokens = Arc<HashMap<[u8; 32], String>>;
 
 pub fn run(config: Config) -> Result<(), String> {
     if config.attesters == 0 || config.attesters > config.workers.len() {
@@ -111,13 +125,24 @@ pub fn run(config: Config) -> Result<(), String> {
     let bytecode_blob = compile(&config.program, &config.function)?;
     let program_hash = bytecode::hash_bytecode(&bytecode_blob);
 
-    let inbox: Inbox = Arc::new(Mutex::new(Vec::new()));
+    // One unguessable token per worker. Only the worker it is dispatched to
+    // ever sees it, so echoing it back is what proves a report answers a
+    // dispatch this coordinator actually made.
+    let assignments: Vec<([u8; 32], String)> = config
+        .workers
+        .iter()
+        .map(|worker| (mint_token(), worker.clone()))
+        .collect();
+    let tokens: Tokens = Arc::new(assignments.iter().cloned().collect());
+
+    let inbox: Inbox = Arc::new(Mutex::new(HashMap::new()));
     let (wake, woken) = channel::<()>();
     serve(
         &config.bind,
         server_key_bytes,
         server_key_hash,
         inbox.clone(),
+        tokens,
         wake,
     )?;
 
@@ -136,12 +161,14 @@ pub fn run(config: Config) -> Result<(), String> {
 
     let dispatch = JobDispatch {
         job_id,
+        // Replaced per worker below; each gets its own token.
+        attestation_token: [0u8; 32],
         bytecode: bytecode_blob,
         function: config.function.clone(),
         inputs,
         server_key_hash,
     };
-    dispatch_to_workers(&config.workers, &dispatch);
+    dispatch_to_workers(&assignments, &dispatch);
 
     let started = Instant::now();
     let outcome = collect(
@@ -202,6 +229,7 @@ fn serve(
     server_key: Vec<u8>,
     server_key_hash: [u8; 32],
     inbox: Inbox,
+    tokens: Tokens,
     wake: Sender<()>,
 ) -> Result<(), String> {
     let server = tiny_http::Server::http(bind).map_err(|e| format!("cannot bind {bind}: {e}"))?;
@@ -224,8 +252,29 @@ fn serve(
                     .and_then(|body| crate::protocol::decode::<JobReport>(&body))
                 {
                     Ok(report) => {
+                        // Attribute the report to the worker this coordinator
+                        // dispatched that token to. Anything else is not an
+                        // attestation, however well-formed it looks.
+                        let Some(worker) = tokens.get(&report.attestation_token) else {
+                            warn!(
+                                claimed = %report.worker,
+                                "discarding report with an unrecognised attestation token"
+                            );
+                            transport::respond(request, 403, b"unrecognised attestation token");
+                            continue;
+                        };
+
                         transport::respond(request, 200, b"ok");
-                        inbox.lock().expect("inbox poisoned").push(report);
+
+                        // One dispatch, one attestation. A repeat overwrites
+                        // rather than accumulating, so a worker cannot inflate
+                        // its own weight by reporting twice.
+                        let mut inbox = inbox.lock().expect("inbox poisoned");
+                        if inbox.insert(worker.clone(), report).is_some() {
+                            warn!(worker = %worker, "worker reported more than once");
+                        }
+                        drop(inbox);
+
                         let _ = wake.send(());
                     }
                     Err(error) => {
@@ -243,10 +292,13 @@ fn serve(
     Ok(())
 }
 
-fn dispatch_to_workers(workers: &[String], dispatch: &JobDispatch) {
-    let body = crate::protocol::encode(dispatch).expect("encode dispatch");
+/// Sends each worker its own copy, carrying its own attestation token.
+fn dispatch_to_workers(assignments: &[([u8; 32], String)], dispatch: &JobDispatch) {
+    for (token, worker) in assignments {
+        let mut addressed = dispatch.clone();
+        addressed.attestation_token = *token;
 
-    for worker in workers {
+        let body = crate::protocol::encode(&addressed).expect("encode dispatch");
         let url = format!("http://{worker}/jobs");
         match transport::post(&url, body.clone()) {
             Ok(()) => info!(worker = %worker, bytes = body.len(), "dispatched"),
@@ -255,6 +307,13 @@ fn dispatch_to_workers(workers: &[String], dispatch: &JobDispatch) {
             Err(error) => warn!(worker = %worker, %error, "cannot dispatch"),
         }
     }
+}
+
+/// Mints an unguessable attestation token.
+fn mint_token() -> [u8; 32] {
+    let mut token = [0u8; 32];
+    getrandom::fill(&mut token).expect("system randomness");
+    token
 }
 
 /// Waits for `required` workers to report the same attestation hash.
@@ -284,6 +343,12 @@ fn collect(
             return agreed;
         }
 
+        // No outstanding worker could still form a quorum, so waiting out the
+        // deadline would only delay a failure we can already call.
+        if agreed.is_none() && !agreement_still_possible(inbox, required, dispatched) {
+            return None;
+        }
+
         let until = match settle_by {
             Some(grace) => grace.min(expiry),
             None => expiry,
@@ -305,6 +370,19 @@ fn reported(inbox: &Inbox) -> usize {
     inbox.lock().expect("inbox poisoned").len()
 }
 
+/// Whether any worker yet to report could still bring a group up to `required`.
+///
+/// Once the answer is no, waiting out the deadline tells us nothing.
+fn agreement_still_possible(inbox: &Inbox, required: usize, dispatched: usize) -> bool {
+    let best = group(inbox)
+        .values()
+        .map(|(_, workers)| workers.len())
+        .max()
+        .unwrap_or(0);
+    let outstanding = dispatched.saturating_sub(reported(inbox));
+    best + outstanding >= required
+}
+
 /// Groups reports by attestation hash and returns the first group to reach
 /// `required` members.
 fn tally(inbox: &Inbox, required: usize) -> Option<(SealedResult, Vec<String>)> {
@@ -318,13 +396,16 @@ fn group(inbox: &Inbox) -> HashMap<[u8; 32], (SealedResult, Vec<String>)> {
     let reports = inbox.lock().expect("inbox poisoned");
 
     let mut groups: HashMap<[u8; 32], (SealedResult, Vec<String>)> = HashMap::new();
-    for report in reports.iter() {
+    for (worker, report) in reports.iter() {
         if let JobOutcome::Evaluated(sealed) = &report.outcome {
+            // Keyed by the worker the coordinator dispatched to, not by the
+            // name in the message: the map holds at most one report per worker,
+            // so each contributes at most one attestation.
             groups
                 .entry(sealed.hash)
                 .or_insert_with(|| (sealed.clone(), Vec::new()))
                 .1
-                .push(report.worker.clone());
+                .push(worker.clone());
         }
     }
     groups
@@ -337,9 +418,9 @@ fn group(inbox: &Inbox) -> HashMap<[u8; 32], (SealedResult, Vec<String>)> {
 /// means a faulty or dishonest worker, and that is a finding rather than noise
 /// to be quietly resolved by taking the majority.
 fn report_outcome(inbox: &Inbox) {
-    for report in inbox.lock().expect("inbox poisoned").iter() {
+    for (worker, report) in inbox.lock().expect("inbox poisoned").iter() {
         if let JobOutcome::Failed(reason) = &report.outcome {
-            warn!(worker = %report.worker, reason = %reason, "worker reported failure");
+            warn!(worker = %worker, reason = %reason, "worker reported failure");
         }
     }
 

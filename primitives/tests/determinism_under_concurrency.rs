@@ -5,16 +5,17 @@
 //! something stronger: workers evaluate *at the same time*, on machines under
 //! load, and must still land on identical bytes.
 //!
-//! The answer turns out to be conditional. Multi-threaded tfhe-rs evaluation is
-//! **not** bit-reproducible — three concurrent processes given byte-identical
-//! inputs produce results that decrypt the same but differ byte for byte, and
-//! pinning the thread count to a fixed value above one does not help. Only
-//! single-threaded evaluation reproduces, which is why the worker role pins the
-//! global rayon pool to one thread.
+//! The answer is no. tfhe-rs evaluation is **not** byte-reproducible: processes
+//! given byte-identical keys and inputs intermittently produce results that
+//! decrypt to the same value but differ byte for byte. Restricting evaluation
+//! to one thread was tried and rejected — it holds on a six-op circuit and
+//! fails on the real eighteen-op one, at ~3x the cost.
 //!
-//! This test pins the property the system actually depends on: with evaluation
-//! single-threaded, concurrent workers agree. `primitives/examples/cross_process.rs`
-//! reproduces the failure the other way, across real processes.
+//! This test states the property M-of-N attestation requires. It is `#[ignore]`d
+//! because that property does not currently hold: it is a specification of what
+//! a replacement scheme has to deliver (architecture.md §3, tasks 2.10a–c), not
+//! a regression guard. Run it with `--ignored` to see the current behaviour;
+//! `primitives/examples/cross_process.rs` reproduces it across real processes.
 
 use std::sync::Arc;
 use std::thread;
@@ -50,6 +51,7 @@ const TALLY: &str = r#"
 "#;
 
 #[test]
+#[ignore = "tfhe-rs evaluation is not byte-reproducible; see architecture.md §3"]
 fn concurrent_workers_agree_byte_for_byte() {
     // The requirement the worker role enforces at startup. Without it this test
     // is flaky by design rather than by accident.

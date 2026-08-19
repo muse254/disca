@@ -97,42 +97,58 @@ allocation, built in release.
 | Worker nodes | Ciphertexts, circuit segment | Plaintext | ≤ threshold may lie about results; M-of-N attestation catches it |
 | Chain / observers | Commitments, bytecode hash, result commitment | Plaintext | — |
 
-**Deterministic evaluation property — conditional.** Two honest workers
-executing the same circuit on the same input ciphertexts produce *byte-identical*
-compressed results, which is what makes M-of-N result-hash matching a
-meaningful, cheap correctness check without any ZK machinery.
+**Deterministic evaluation property — DOES NOT HOLD. This invalidates L0 as
+currently designed.**
 
-**That holds only when evaluation is single-threaded.** tfhe-rs multi-threaded
-evaluation is *not* bit-reproducible: the same circuit over the same ciphertexts
-yields results that decrypt identically but differ byte for byte, because the
-noise drawn during evaluation depends on how the work was split across threads.
-Pinning the thread count does not fix it — measured with `RAYON_NUM_THREADS=4`,
-three concurrent processes given byte-identical inputs still diverged. Only one
-thread is reproducible.
+The M-of-N scheme in §7 assumes two honest workers executing the same circuit
+over the same input ciphertexts produce *byte-identical* results, so that
+agreement on `keccak256(result)` is evidence of correct evaluation. Measured
+against tfhe-rs 1.5, that is false.
 
-This was found by running three workers concurrently, not by reading: honest
-workers intermittently disagreed and no job settled. Reproduce it with
-`primitives/examples/cross_process.rs`.
+Three processes given byte-identical server keys and byte-identical inputs,
+evaluating the same circuit, intermittently produce results that decrypt to the
+same value but differ byte for byte. Reproduce with
+`primitives/examples/cross_process.rs`:
 
-Consequences:
+| Circuit | Threads | 3 concurrent processes, 6 rounds |
+|---|---|---|
+| 6-op (`max` of two) | default | diverged |
+| 6-op | `RAYON_NUM_THREADS=1` | agreed 5/5 |
+| **18-op (`tally4_select`)** | **`RAYON_NUM_THREADS=1`** | **diverged in 2 of 6 rounds** |
 
-1. **Workers must evaluate single-threaded.** `node`'s worker role pins the
-   global rayon pool to one thread at startup
-   (`pin_evaluation_to_one_thread`). It is a correctness requirement, not a
-   tuning knob.
-2. **It costs about 3x.** A compare-and-select circuit went from 0.65 s to
-   2.14 s on 8 cores. Evaluation is now bounded by single-core speed, so the
-   circuit-size headroom in §2 shrinks accordingly.
-3. **This is the strongest argument for climbing the ladder in §7.** L1
-   (optimistic challenge) and L2 (ZK proof of correct evaluation) verify
-   *computation* rather than byte equality, and would let workers use every
-   core they have.
+Restricting evaluation to one thread was tried and rejected: it appeared to work
+on a six-op circuit, does not hold on the real demo circuit, and costs ~3x
+(0.65 s → 2.14 s). Divergence gets likelier as circuits get longer, which is the
+wrong direction. The likely mechanism is randomness drawn during evaluation
+(noise management), which is a property of the scheme rather than of threading.
 
-Compression is deterministic and remains so (`compression_is_deterministic`);
-the attested hash covers the compressed blob so the bridge contract can verify
-the ciphertext it emits (bridge.md §5a). Evaluation determinism is pinned by
-`results_are_deterministic` and, under concurrency, by
-`primitives/tests/determinism_under_concurrency.rs`.
+Compression *is* deterministic (`compression_is_deterministic`); the problem is
+upstream of it.
+
+### What this means
+
+`node`'s coordinator and workers are complete and correct in every other
+respect, but jobs fail to reach agreement at random, because honest workers
+disagree. **The attestation scheme needs a foundation other than byte
+equality.** Options, in rough order of cost:
+
+1. **Key-holder adjudication.** The key holder decrypts each worker's result and
+   compares *plaintexts*; M-of-N is decided on the decrypted value. Sound, and
+   cheap to build. Cost: the contract can no longer verify agreement itself —
+   the key holder attests — which weakens bridge.md §5a's guarantee and puts the
+   key holder on the critical path of every job.
+2. **A deterministic evaluation mode.** tfhe exposes `DeterministicSeeder` in
+   `core_crypto`, but it is wired into key generation and low-level encryption,
+   not the high-level evaluation path used here. Worth investigating whether
+   server-side randomness can be seeded per job; if it can, byte equality
+   returns and nothing else in the design changes.
+3. **Climb the ladder early (§7).** L1's optimistic challenge window verifies
+   *computation* rather than byte equality — a challenger re-executes and
+   disputes the decrypted result. L2's ZK proofs likewise. Both were roadmap;
+   this finding is the argument for pulling L1 forward.
+
+Recorded as tasks 2.10a–c. Until one is chosen, treat M-of-N result-hash
+matching as **unimplemented**, not merely unpolished.
 
 ## 4. System overview
 

@@ -33,6 +33,20 @@ pub struct InputBlob {
 #[derive(Debug, Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct JobDispatch {
     pub job_id: u64,
+    /// Authorises exactly one attestation, and identifies which dispatch it
+    /// answers.
+    ///
+    /// The coordinator mints a fresh unguessable token per (job, worker) and
+    /// only the worker it dispatched to ever sees it. A worker echoes its token
+    /// back in [`JobReport`], which is what lets the coordinator attribute a
+    /// report to the worker it actually sent the job to instead of trusting a
+    /// self-declared name. Without this, one worker can report M times under M
+    /// invented identities and settle a job single-handedly.
+    ///
+    /// This binds a report to a dispatch; it does not make a worker
+    /// unimpersonable to someone who has seen its token. Real Sybil resistance
+    /// needs per-worker signing keys — see `architecture.md` §11 Q3.
+    pub attestation_token: [u8; 32],
     /// DISCA bytecode. The worker validates it before evaluating anything.
     pub bytecode: Vec<u8>,
     /// Which exported function of that program to run.
@@ -57,9 +71,12 @@ pub enum JobOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct JobReport {
     pub job_id: u64,
-    /// Identifies the attester. Phase 1 uses the address the worker is
-    /// registered under on-chain rather than a signature, per
-    /// `architecture.md` §11 Q3, so this field is the whole identity.
+    /// The token from the dispatch being answered. The coordinator resolves
+    /// this to the worker it dispatched to; a report carrying an unknown or
+    /// already-spent token is not counted.
+    pub attestation_token: [u8; 32],
+    /// What the worker calls itself. Useful in logs, and nothing more — it is
+    /// self-declared, so it must never be what agreement is counted by.
     pub worker: String,
     pub outcome: JobOutcome,
     /// Evaluation wall-clock, so the coordinator can see which worker is slow
@@ -90,6 +107,7 @@ mod tests {
     fn dispatch() -> JobDispatch {
         JobDispatch {
             job_id: 42,
+            attestation_token: [11u8; 32],
             bytecode: vec![1, 2, 3, 4],
             function: "tally4_select".into(),
             inputs: vec![InputBlob {
@@ -110,6 +128,7 @@ mod tests {
     fn a_successful_report_round_trips() {
         let report = JobReport {
             job_id: 42,
+            attestation_token: [11u8; 32],
             worker: "worker-1".into(),
             outcome: JobOutcome::Evaluated(SealedResult {
                 blob: vec![5; 128],
@@ -126,6 +145,7 @@ mod tests {
     fn a_failure_report_round_trips() {
         let report = JobReport {
             job_id: 7,
+            attestation_token: [12u8; 32],
             worker: "worker-2".into(),
             outcome: JobOutcome::Failed("stack underflow at op 3".into()),
             elapsed_ms: 12,

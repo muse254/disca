@@ -55,7 +55,7 @@ fn setup(dir: &Path) {
     let server_key = wire::encode_server_key(&CompressedServerKey::new(&client_key)).unwrap();
     std::fs::write(dir.join("server_key.bin"), &server_key).unwrap();
 
-    for (i, value) in [71i32, 93i32].iter().enumerate() {
+    for (i, value) in [71i32, 93i32, 42i32, 88i32].iter().enumerate() {
         let blob = wire::encode(&wire::encrypt_input(*value, &client_key).unwrap()).unwrap();
         std::fs::write(dir.join(format!("input{i}.bin")), &blob).unwrap();
     }
@@ -67,15 +67,30 @@ fn eval(dir: &Path) {
     let server_key = std::fs::read(dir.join("server_key.bin")).expect("run setup first");
     set_server_key(wire::decode_server_key(&server_key).unwrap());
 
-    let inputs: Vec<FheInt32> = (0..2)
+    let inputs: Vec<FheInt32> = (0..4)
         .map(|i| {
             let blob = std::fs::read(dir.join(format!("input{i}.bin"))).unwrap();
             wire::decompress(&wire::decode(&blob).unwrap())
         })
         .collect();
 
-    let program = DiscaProgram::from_program(&Program::from_wat(TALLY).unwrap());
-    let result = program.function("max").unwrap().run(&inputs).unwrap();
+    // Use the real demo circuit when it is available; a six-op toy is not
+    // representative of what workers actually evaluate.
+    let wasm = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../committee-tally/committee_tally.wasm"
+    );
+    let (program, name) = match std::fs::read(wasm) {
+        Ok(bytes) => (
+            DiscaProgram::from_program(&Program::from_wasm(&bytes).unwrap()),
+            "tally4_select",
+        ),
+        Err(_) => (
+            DiscaProgram::from_program(&Program::from_wat(TALLY).unwrap()),
+            "max",
+        ),
+    };
+    let result = program.function(name).unwrap().run(&inputs).unwrap();
     let sealed = wire::seal_result(&result).unwrap();
 
     println!("{}", bytecode::hex(&sealed.hash));
