@@ -201,6 +201,25 @@ involved.
       convincing thing in the eventual demo video.
 - [x] Assert the key holder decrypts the expected plaintext at the end.
 
+### 2.9 Review follow-ups (PR #9)
+
+- [x] **2.9a Bind attestations to dispatches.** Agreement was counted over
+      self-declared worker names with no registry check and no de-duplication,
+      so one worker could settle a job alone. Per-(job, worker) tokens now
+      attribute each report to the worker it was dispatched to.
+- [x] **2.9b Bound the worker job queue** and refuse with 503 when full.
+- [x] **2.9c Refuse when two groups both reach quorum** rather than letting
+      `HashMap` order pick a winner. Reachable whenever `M <= N/2`.
+- [x] **2.9d Check HTTP status and fail loudly on truncation.** A 404 body was
+      being handed back to the caller as the server key.
+- [x] **2.9e Stop overclaiming the commitment checks.** The commitment travels
+      in the same message as the bytes it commits to, so it detects corruption,
+      not a malicious coordinator. Real once the commitment comes from the
+      chain (Track 3).
+- [ ] **2.9f Re-verify input commitments against the chain**, not against the
+      dispatch, once `submitJob` exists. This is what makes 2.9e's check
+      adversarial rather than merely diagnostic.
+
 ### 2.10 Byte-equality attestation does not work — decide the replacement
 
 tfhe-rs evaluation is not byte-reproducible. Honest workers given identical keys

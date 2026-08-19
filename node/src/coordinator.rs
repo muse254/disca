@@ -386,9 +386,24 @@ fn agreement_still_possible(inbox: &Inbox, required: usize, dispatched: usize) -
 /// Groups reports by attestation hash and returns the first group to reach
 /// `required` members.
 fn tally(inbox: &Inbox, required: usize) -> Option<(SealedResult, Vec<String>)> {
-    group(inbox)
+    let mut quorums: Vec<(SealedResult, Vec<String>)> = group(inbox)
         .into_values()
-        .find(|(_, workers)| workers.len() >= required)
+        .filter(|(_, workers)| workers.len() >= required)
+        .collect();
+
+    // With `required <= dispatched / 2`, two groups can both reach quorum. That
+    // means the fault threshold has been exceeded and neither answer is
+    // trustworthy, so refusing is the honest outcome — picking one would be a
+    // coin flip decided by hash iteration order.
+    if quorums.len() > 1 {
+        warn!(
+            quorums = quorums.len(),
+            "more than one group reached quorum; refusing to choose between them"
+        );
+        return None;
+    }
+
+    quorums.pop()
 }
 
 /// Buckets the reports received so far by attestation hash.

@@ -9,6 +9,8 @@
 //! itself. Serial evaluation is also honest about what a worker is: one
 //! machine's worth of CPU.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::Instant;
@@ -65,8 +67,12 @@ pub fn run(config: Config) -> Result<(), String> {
         );
     }
 
+    // Dispatches arrive faster than they can be evaluated, and any peer that
+    // can reach this port can send them. Without a ceiling the queue is an
+    // unbounded allocation an attacker controls.
+    let queued = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = channel::<JobDispatch>();
-    let evaluator = spawn_evaluator(&config, rx);
+    let evaluator = spawn_evaluator(&config, rx, queued.clone());
 
     for mut request in server.incoming_requests() {
         // Accept and acknowledge immediately. Evaluation takes seconds, and a
@@ -74,7 +80,14 @@ pub fn run(config: Config) -> Result<(), String> {
         match transport::read_body(&mut request) {
             Ok(body) => match crate::protocol::decode::<JobDispatch>(&body) {
                 Ok(dispatch) => {
+                    if queued.load(Ordering::Acquire) >= MAX_QUEUED_JOBS {
+                        warn!(job_id = dispatch.job_id, "queue full, refusing job");
+                        transport::respond(request, 503, b"queue full");
+                        continue;
+                    }
+
                     info!(job_id = dispatch.job_id, worker = %config.id, "job accepted");
+                    queued.fetch_add(1, Ordering::AcqRel);
                     let _ = tx.send(dispatch);
                     transport::respond(request, 202, b"accepted");
                 }
@@ -95,7 +108,16 @@ pub fn run(config: Config) -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_evaluator(config: &Config, rx: Receiver<JobDispatch>) -> thread::JoinHandle<()> {
+/// How many dispatches may wait to be evaluated. Each holds its inputs and
+/// bytecode in memory, and evaluation is seconds per job, so a deep queue is
+/// latency nobody wants and memory nobody bounded.
+const MAX_QUEUED_JOBS: usize = 16;
+
+fn spawn_evaluator(
+    config: &Config,
+    rx: Receiver<JobDispatch>,
+    queued: Arc<AtomicUsize>,
+) -> thread::JoinHandle<()> {
     let id = config.id.clone();
     let coordinator = config.coordinator.clone();
     let behaviour = config.behaviour;
@@ -107,6 +129,7 @@ fn spawn_evaluator(config: &Config, rx: Receiver<JobDispatch>) -> thread::JoinHa
         let mut installed: Option<[u8; 32]> = None;
 
         for dispatch in rx {
+            queued.fetch_sub(1, Ordering::AcqRel);
             let span = info_span!("job", job_id = dispatch.job_id, worker = %id);
             let _enter = span.enter();
 
@@ -174,7 +197,10 @@ fn install_server_key(coordinator: &str, hash: &[u8; 32]) -> Result<(), String> 
         bytecode::hex(hash)
     ))?;
 
-    // Addressing the key by hash is only worth anything if we check it.
+    // Confirms the coordinator served the key it advertised in the dispatch,
+    // and catches a truncated or corrupted transfer. Both the hash and the key
+    // come from the coordinator, so this does not make the coordinator
+    // trustworthy — it makes it consistent.
     let actual = wire::commitment(&bytes);
     if actual != *hash {
         return Err(format!(
@@ -208,8 +234,11 @@ fn evaluate(dispatch: &JobDispatch, behaviour: Behaviour) -> Result<wire::Sealed
 
     let mut inputs = Vec::with_capacity(dispatch.inputs.len());
     for (index, blob) in dispatch.inputs.iter().enumerate() {
-        // A worker must not evaluate over bytes the coordinator altered between
-        // the chain and here. The commitment is what the contract pinned.
+        // Detects corruption in transit only. The commitment travels in the
+        // same message as the bytes it commits to, so a malicious coordinator
+        // simply recomputes it — this cannot police the sender. It becomes a
+        // real check once the commitment is read from the chain rather than
+        // taken from the dispatch (Track 3).
         let actual = wire::commitment(&blob.bytes);
         if actual != blob.commitment {
             return Err(format!(
