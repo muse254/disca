@@ -6,6 +6,12 @@ edition.workspace = true
 description.workspace = true
 homepage.workspace = true
 
+[features]
+# Off by default, so a release build has no way to return a wrong answer on
+# purpose. `scripts/run-local.sh` turns it on explicitly, because demonstrating
+# M-of-N requires a worker that disagrees.
+fault-injection = []
+
 [dependencies]
 tfhe = { workspace = true }
 primitives = { path = "../primitives" }

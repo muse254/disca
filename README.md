@@ -30,7 +30,9 @@ The scores `71,93,42,88` are encrypted before they leave the key holder. No
 worker sees a plaintext, and the winning score comes back correct.
 
 Single process, no network — the quickest way to tell whether a failure is in
-the execution core or the transport:
+the execution core or the transport. **Debug builds only**: it doubles as the
+key holder, encrypting and decrypting in the same process, which is exactly the
+separation a deployment has to keep.
 
 ```sh
 cargo run -p node -- demo
@@ -50,6 +52,24 @@ Tests: `cargo test --workspace`. Note that
 `primitives/tests/determinism_under_concurrency.rs` spawns child processes — it
 guards byte-reproducibility of evaluation, which M-of-N depends on and which an
 in-process test cannot check (see [architecture.md](docs/architecture.md) §3).
+
+## Build shapes
+
+A default release build has no `demo` role and no `--faulty` flag — neither
+belongs in a production binary:
+
+```sh
+cargo build --release -p node                              # what you would ship
+cargo build --release -p node --features fault-injection   # adds --faulty
+cargo build -p node                                        # debug; adds `demo`
+```
+
+`scripts/run-local.sh` opts into `fault-injection` explicitly, because
+demonstrating M-of-N requires a worker that disagrees.
+
+`node/src/main.rs` lists the assumptions the binary makes but does not enforce —
+worth reading before trusting a result, since a violation shows up as workers
+disagreeing rather than as anything failing loudly.
 
 ## Status
 
@@ -102,5 +122,4 @@ make clean
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT License](LICENSE-MIT) at your option.
+[MIT](LICENSE).

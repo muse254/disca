@@ -3,9 +3,8 @@
 Status: working checklist derived from [architecture.md](architecture.md) and
 [bridge.md](bridge.md) against the code as merged in #2.
 
-Timeline: today is 2026-08-18. ETHOnline runs **Sept 4–16** (12 days), so there
-are ~17 days of prep first. Track 0 is prep work that de-risks the hackathon;
-tracks 1–4 are the build.
+Track 0 is groundwork — measurement, encoding, tooling — that everything else
+depends on. Tracks 1–4 are the build, roughly in dependency order.
 
 Dependency spine — nothing in the bridge track can start until **0.2** lands,
 and the demo in architecture.md §10 can't be built until **1.1** lands:
@@ -19,9 +18,9 @@ and the demo in architecture.md §10 can't be built until **1.1** lands:
 
 ---
 
-## Track 0 — Prep (do before Sept 4)
+## Track 0 — Groundwork
 
-Cheap, unblocks estimation, and none of it burns hackathon hours.
+Cheap, and unblocks estimating everything downstream.
 
 - [x] **0.1 Commit the measurement harness.** The numbers in architecture.md §2
       came from a `size_probe` example that was never checked in — only its
@@ -220,6 +219,20 @@ involved.
       dispatch, once `submitJob` exists. This is what makes 2.9e's check
       adversarial rather than merely diagnostic.
 
+### 2.11 Housekeeping
+
+- [x] **2.11a Keep `logic_gates` out of the binary.** The gate-composition route
+      to FHE arithmetic has no callers — the evaluator uses tfhe's integer API.
+      Now behind the `boolean-circuits` feature, off by default, documented as
+      the deliberate alternative rather than deleted (the whitepaper describes
+      that approach and this is its only implementation). Its truth-table tests
+      were ~7.3 s of the primitives suite, about a third, guarding unused code.
+- [ ] **2.11b Build with `--all-features` in CI.** `boolean-circuits` is not
+      compiled by an ordinary build, so nothing type-checks it and it will rot.
+- [ ] **2.11c Implement `disca-cli parse` (see 4.3).** It now exits 2 with a
+      pointer to the `inspect` example instead of accepting a file, doing
+      nothing, and reporting success.
+
 ### 2.10 Byte-equality attestation — fixed by pinning the FFT plan
 
 Investigation and measurements: [PR #9](https://github.com/muse254/disca/pull/9).
@@ -247,6 +260,17 @@ to 6 of 6. Full write-up in architecture.md §3.
       pinning is skipped (`DISCA_SKIP_PIN=1`). It also covers the polynomial
       size, which has no public accessor — if `ConfigBuilder::default()` ever
       moves off 2048 the pin covers nothing and this test fails.
+- [ ] **2.10g Model the faults a deployment would actually hit.** `--faulty`
+      injects one mode: a well-formed wrong answer, i.e. the adversarial case.
+      The divergence we have actually observed was *misconfiguration* — honest
+      workers disagreeing 6 of 12 runs before the FFT plan was pinned. Add fault
+      modes for the realistic causes (mismatched architecture, tfhe version
+      skew, unpinned plan, GPU build) plus crash, hang and garbage output, so
+      the local run exercises what registration will have to reject.
+- [x] **2.10h Keep fault injection and the demo role out of release builds.**
+      `--faulty` is behind the `fault-injection` feature, off by default; the
+      `demo` role is `#[cfg(debug_assertions)]`. A default release build has
+      neither. `scripts/run-local.sh` opts in explicitly.
 - [ ] **2.10f Keep the divergence path anyway.** Agreement can still fail for
       reasons we have not seen; a disputed job must stay a first-class outcome
       rather than an assertion.

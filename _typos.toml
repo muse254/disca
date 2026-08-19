@@ -1,0 +1,4 @@
+# Proper nouns the spell checker does not know.
+[default.extend-words]
+# Marshall Pease, co-author of "The Byzantine Generals Problem" (1982).
+Pease = "Pease"
