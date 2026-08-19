@@ -157,6 +157,37 @@ exactly why an in-process determinism test passes while separate workers
 disagree, and why a whole round of concurrent workers can drift together (they
 benchmark under the same contention).
 
+#### Why a different FFT algorithm changes the bytes
+
+A *butterfly* is the atomic step of an FFT: take two values and a twiddle factor
+`w`, produce `a + w·b` and `a - w·b`. Drawn as a dataflow diagram the inputs
+cross over to the outputs, which is where the name comes from. A 2048-point FFT
+is thousands of these arranged in stages.
+
+`Dif4`, radix-2, decimation-in-time and the rest all compute the *same*
+mathematical transform. What differs is the order and grouping of those
+butterflies — which partial sums form first, and how they nest. In exact
+arithmetic that would not matter, because addition is associative. In floating
+point it is not, because every operation rounds:
+
+```
+(1.0 + 1e16) - 1e16  =  0.0     <- the 1.0 is lost to rounding
+1.0 + (1e16 - 1e16)  =  1.0     <- it survives
+```
+
+TFHE uses FFTs to make polynomial multiplication fast during bootstrapping:
+integer torus coefficients go out to floating point, get multiplied in the
+frequency domain, and come back as integers. That last conversion rounds, so a
+coefficient sitting near a boundary can land on `k` under one ordering and
+`k ± 1` under another. The result is still a perfectly valid ciphertext — the
+noise budget absorbs a one-unit wobble, which is why every divergent run still
+decrypted to the correct answer — but the bytes differ, and the bytes are what
+`keccak256` sees.
+
+The full chain: **different algorithm chosen → different butterfly ordering →
+different rounding → a torus coefficient off by one → different ciphertext bytes
+→ different attestation hash → no quorum.**
+
 **The fix is one call before anything touches a key**, `pin_fft_plan` in
 `node/src/main.rs`, using the public `setup_custom_fft_plan` demonstrated in
 tfhe-rs's own `examples/manual_fft.rs`. Measured on the demo circuit, three
