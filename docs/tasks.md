@@ -3,9 +3,8 @@
 Status: working checklist derived from [architecture.md](architecture.md) and
 [bridge.md](bridge.md) against the code as merged in #2.
 
-Timeline: today is 2026-08-18. ETHOnline runs **Sept 4–16** (12 days), so there
-are ~17 days of prep first. Track 0 is prep work that de-risks the hackathon;
-tracks 1–4 are the build.
+Track 0 is groundwork — measurement, encoding, tooling — that everything else
+depends on. Tracks 1–4 are the build, roughly in dependency order.
 
 Dependency spine — nothing in the bridge track can start until **0.2** lands,
 and the demo in architecture.md §10 can't be built until **1.1** lands:
@@ -19,9 +18,9 @@ and the demo in architecture.md §10 can't be built until **1.1** lands:
 
 ---
 
-## Track 0 — Prep (do before Sept 4)
+## Track 0 — Groundwork
 
-Cheap, unblocks estimation, and none of it burns hackathon hours.
+Cheap, and unblocks estimating everything downstream.
 
 - [x] **0.1 Commit the measurement harness.** The numbers in architecture.md §2
       came from a `size_probe` example that was never checked in — only its

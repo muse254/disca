@@ -1,6 +1,6 @@
 # DISCA / Ethereum Bridge Design
 
-Status: draft (pre-hackathon planning for ETHOnline 2026)
+Status: draft.
 
 The bridge is what makes DISCA an **FHE coprocessor for Ethereum**: contracts
 request confidential computation; DISCA nodes execute it on ciphertexts; result
