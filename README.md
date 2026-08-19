@@ -8,6 +8,11 @@ Design docs: [architecture.md](docs/architecture.md) (constraints, trust model)
 · [bridge.md](docs/bridge.md) (Ethereum boundary)
 · [attestation.md](docs/attestation.md) (why M-of-N, and what it costs)
 · [tasks.md](docs/tasks.md) (what is built and what is next)
+· [tfhe-determinism-request.md](docs/tfhe-determinism-request.md) (why evaluation
+must be pinned to be reproducible)
+
+Design decisions carry a pointer to the pull request that produced them, so the
+reasoning and the dead ends stay recoverable rather than only the conclusion.
 
 ## Running it
 

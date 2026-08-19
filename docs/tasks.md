@@ -222,6 +222,8 @@ involved.
 
 ### 2.10 Byte-equality attestation — fixed by pinning the FFT plan
 
+Investigation and measurements: [PR #9](https://github.com/muse254/disca/pull/9).
+
 The divergence was never randomness: tfhe-rs benchmarks FFT algorithms for 10 ms
 at first use and caches the winner, so different processes pick different
 numerically-equivalent algorithms and round a few coefficients differently.

@@ -7,6 +7,11 @@ Companion to `architecture.md` §3 (trust model) and §7 (verification ladder),
 and `bridge.md` §5a (which bytes the hash covers). Read this one first if the
 question is *why does this mechanism exist at all*.
 
+The measurements here, and the reproducibility investigation behind §5b, were
+produced in [PR #9](https://github.com/muse254/disca/pull/9), which carries the
+commit-by-commit reasoning if you want to follow how the conclusions were
+reached rather than take them.
+
 ## 1. The problem attestation solves
 
 A worker returns a ciphertext. Nobody who receives it can tell whether it is the

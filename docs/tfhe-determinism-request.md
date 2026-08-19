@@ -1,5 +1,9 @@
 # Byte-reproducible evaluation in tfhe-rs: root cause, prior art, and what to ask for
 
+Context: found while building M-of-N attestation in
+[PR #9](https://github.com/muse254/disca/pull/9), which carries the end-to-end
+measurements and the DISCA-side fix.
+
 Status: research note. Written to answer one question — is "reproducible/deterministic
 homomorphic evaluation" a sensible feature request to make to Zama, and if so, what
 exactly should the request say?

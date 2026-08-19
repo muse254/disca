@@ -188,6 +188,12 @@ The full chain: **different algorithm chosen → different butterfly ordering �
 different rounding → a torus coefficient off by one → different ciphertext bytes
 → different attestation hash → no quorum.**
 
+Full investigation, including two wrong diagnoses before the FFT plan was
+identified — leftover processes, then threading — is in
+[PR #9](https://github.com/muse254/disca/pull/9). Worth reading if you need the
+reasoning rather than the conclusion; the dead ends are the part that is hard to
+reconstruct later.
+
 **The fix is one call before anything touches a key**, `pin_fft_plan` in
 `node/src/main.rs`, using the public `setup_custom_fft_plan` demonstrated in
 tfhe-rs's own `examples/manual_fft.rs`. Measured on the demo circuit, three
