@@ -450,3 +450,210 @@ fn report_outcome(inbox: &Inbox) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stands in for a worker's sealed result. Only the hash matters to
+    /// aggregation — the blob is opaque to the coordinator, which is the point:
+    /// it settles on bytes it cannot read.
+    fn sealed(marker: u8) -> SealedResult {
+        SealedResult {
+            blob: vec![marker; 16],
+            hash: [marker; 32],
+        }
+    }
+
+    fn evaluated(worker: &str, marker: u8) -> (String, JobReport) {
+        report(worker, JobOutcome::Evaluated(sealed(marker)))
+    }
+
+    fn failed(worker: &str, reason: &str) -> (String, JobReport) {
+        report(worker, JobOutcome::Failed(reason.into()))
+    }
+
+    fn report(worker: &str, outcome: JobOutcome) -> (String, JobReport) {
+        (
+            worker.to_string(),
+            JobReport {
+                job_id: 1,
+                attestation_token: [0u8; 32],
+                worker: worker.to_string(),
+                outcome,
+                elapsed_ms: 1,
+            },
+        )
+    }
+
+    fn inbox(reports: Vec<(String, JobReport)>) -> Inbox {
+        Arc::new(Mutex::new(reports.into_iter().collect()))
+    }
+
+    #[test]
+    fn a_majority_that_agrees_settles_and_names_its_attesters() {
+        let inbox = inbox(vec![
+            evaluated("w1", 0xaa),
+            evaluated("w2", 0xaa),
+            evaluated("w3", 0xbb),
+        ]);
+
+        let (result, mut attesters) = tally(&inbox, 2).expect("two workers agreed");
+        assert_eq!(result.hash, [0xaa; 32]);
+
+        // The attester set is what `fulfillJob` will take on-chain, so it must
+        // be the workers that actually reported that hash and no one else.
+        attesters.sort();
+        assert_eq!(attesters, vec!["w1".to_string(), "w2".to_string()]);
+    }
+
+    #[test]
+    fn two_groups_at_quorum_refuse_to_settle() {
+        // Reachable whenever M <= N/2 (task 2.9c). Both groups are "valid" by
+        // the counting rule, which means the fault threshold has been exceeded
+        // and neither answer is trustworthy. Returning either one would be a
+        // coin flip decided by HashMap iteration order — and it would look, to
+        // everyone downstream, exactly like a settled job.
+        let inbox = inbox(vec![
+            evaluated("w1", 0xaa),
+            evaluated("w2", 0xaa),
+            evaluated("w3", 0xbb),
+            evaluated("w4", 0xbb),
+        ]);
+
+        assert!(
+            tally(&inbox, 2).is_none(),
+            "a split quorum must be refused, not resolved by iteration order"
+        );
+    }
+
+    #[test]
+    fn a_failure_report_is_not_an_attestation() {
+        // A worker that says "I could not evaluate" has attested to nothing.
+        // Counting failures towards a quorum would let two broken workers
+        // settle a job between them.
+        let inbox = inbox(vec![
+            evaluated("w1", 0xaa),
+            failed("w2", "stack underflow at op 3"),
+            failed("w3", "stack underflow at op 3"),
+        ]);
+
+        assert!(tally(&inbox, 2).is_none());
+        assert_eq!(
+            group(&inbox).len(),
+            1,
+            "only the evaluated report forms a group"
+        );
+    }
+
+    #[test]
+    fn agreement_stops_being_possible_once_everyone_has_disagreed() {
+        // Three workers, three different answers, two required. Nobody is left
+        // to break the tie, so waiting out the deadline tells us nothing —
+        // this is what turns a 120 s timeout into an immediate failure.
+        let all_disagreed = inbox(vec![
+            evaluated("w1", 0xaa),
+            evaluated("w2", 0xbb),
+            evaluated("w3", 0xcc),
+        ]);
+        assert!(!agreement_still_possible(&all_disagreed, 2, 3));
+
+        // Same shape one report earlier: the outstanding worker could still
+        // join either group, so the job must stay open.
+        let one_outstanding = inbox(vec![evaluated("w1", 0xaa), evaluated("w2", 0xbb)]);
+        assert!(agreement_still_possible(&one_outstanding, 2, 3));
+    }
+
+    #[test]
+    fn a_hopeless_job_fails_immediately_rather_than_waiting_out_the_deadline() {
+        let inbox = inbox(vec![
+            evaluated("w1", 0xaa),
+            evaluated("w2", 0xbb),
+            evaluated("w3", 0xcc),
+        ]);
+        let (_wake, woken) = channel::<()>();
+
+        let started = Instant::now();
+        let outcome = collect(&inbox, &woken, 2, 3, Duration::from_secs(120));
+
+        assert!(outcome.is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "collect waited {:?} for a quorum that can no longer form",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_settled_job_does_not_sit_out_the_straggler_grace_once_everyone_has_reported() {
+        // The grace period exists to catch a worker that has not spoken yet.
+        // When all of them have, holding the job open for another five seconds
+        // is latency bought for nothing.
+        let inbox = inbox(vec![
+            evaluated("w1", 0xaa),
+            evaluated("w2", 0xaa),
+            evaluated("w3", 0xbb),
+        ]);
+        let (_wake, woken) = channel::<()>();
+
+        let started = Instant::now();
+        let (result, _) =
+            collect(&inbox, &woken, 2, 3, Duration::from_secs(120)).expect("two workers agreed");
+
+        assert_eq!(result.hash, [0xaa; 32]);
+        assert!(
+            started.elapsed() < STRAGGLER_GRACE,
+            "collect waited {:?} after every worker had reported",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn every_token_a_coordinator_mints_is_distinct() {
+        // Tokens are what bind a report to a dispatch (task 2.9a). Two workers
+        // sharing one would be able to answer for each other, which is the
+        // failure the token exists to prevent.
+        let tokens: std::collections::HashSet<[u8; 32]> = (0..64).map(|_| mint_token()).collect();
+        assert_eq!(tokens.len(), 64);
+        assert!(
+            !tokens.contains(&[0u8; 32]),
+            "an all-zero token is not random"
+        );
+    }
+
+    const TALLY_WASM: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../committee-tally/committee_tally.wasm"
+    );
+
+    #[test]
+    fn a_compiled_program_is_something_a_worker_can_decode_and_run() {
+        // The coordinator compiles once and every worker decodes the same
+        // blob. If what `compile` emits were not accepted by
+        // `bytecode::deserialize` -- which validates as well as decodes -- the
+        // job would fan out to every worker and fail on all of them at once.
+        let blob = compile(TALLY_WASM, "tally4_select").unwrap();
+
+        let program = bytecode::deserialize(&blob).expect("a worker must accept this");
+        let func = program
+            .function("tally4_select")
+            .expect("the function the job named");
+        assert_eq!(func.sig.params.len(), 4);
+        assert_eq!(func.sig.results.len(), 1);
+    }
+
+    #[test]
+    fn compiling_refuses_a_function_the_program_does_not_export() {
+        // Cheap here, expensive later: this runs before keygen and before any
+        // dispatch, so a typo costs a millisecond instead of fanning a doomed
+        // job out to three workers and waiting for the deadline.
+        let error = compile(TALLY_WASM, "tally5_select").unwrap_err();
+        assert!(error.contains("tally5_select"), "names it: {error}");
+    }
+
+    #[test]
+    fn compiling_refuses_a_program_that_is_not_there() {
+        let error = compile("committee-tally/does-not-exist.wasm", "max2").unwrap_err();
+        assert!(error.contains("does-not-exist.wasm"), "names it: {error}");
+    }
+}

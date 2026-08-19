@@ -14,3 +14,6 @@ whitepaper/*.bbl
 whitepaper/*.blg
 whitepaper/*.synctex.gz
 whitepaper/*.pdf
+
+# Python bytecode from scripts/lib
+__pycache__/

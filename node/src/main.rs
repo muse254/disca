@@ -196,3 +196,109 @@ fn init_telemetry() {
         .with_target(false)
         .init();
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    #[test]
+    fn the_cli_definition_is_internally_consistent() {
+        // clap validates its own configuration at runtime and panics on a
+        // duplicate short flag or a default that does not parse. Doing it here
+        // means a broken definition fails a test instead of failing the first
+        // person to run the binary.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn coordinator_inputs_are_comma_separated() {
+        // scripts/run-local.sh passes `--inputs 71,93,42,88` as one argument.
+        // Lose the delimiter and every invocation in the README and the demo
+        // breaks, with an error about an invalid integer rather than about the
+        // flag.
+        let cli = Cli::try_parse_from([
+            "node",
+            "coordinator",
+            "--worker",
+            "127.0.0.1:8081",
+            "--program",
+            "committee-tally/committee_tally.wasm",
+            "--function",
+            "tally4_select",
+            "--inputs",
+            "71,93,42,88",
+        ])
+        .unwrap();
+
+        let Role::Coordinator {
+            inputs,
+            attesters,
+            deadline_secs,
+            bind,
+            ..
+        } = cli.role
+        else {
+            panic!("parsed as the wrong role");
+        };
+
+        assert_eq!(inputs, vec![71, 93, 42, 88]);
+        // The defaults run-local.sh and the README rely on.
+        assert_eq!(attesters, 2);
+        assert_eq!(deadline_secs, 120);
+        assert_eq!(bind, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn a_coordinator_with_no_workers_is_refused_by_the_parser() {
+        // Also checked in `coordinator::run`, but a job with nobody to dispatch
+        // to should not get as far as generating a keypair.
+        assert!(
+            Cli::try_parse_from([
+                "node",
+                "coordinator",
+                "--program",
+                "p.wasm",
+                "--function",
+                "f",
+                "--inputs",
+                "1",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_worker_takes_its_identity_and_its_behaviour_from_the_command_line() {
+        let cli = Cli::try_parse_from(["node", "worker", "--id", "worker-3", "--faulty"]).unwrap();
+
+        let Role::Worker {
+            id,
+            faulty,
+            coordinator,
+            ..
+        } = cli.role
+        else {
+            panic!("parsed as the wrong role");
+        };
+
+        assert_eq!(id, "worker-3");
+        assert!(
+            faulty,
+            "--faulty must reach the worker; run-local.sh needs it"
+        );
+        assert_eq!(coordinator, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn an_honest_worker_is_the_default() {
+        // Faulty must be something you ask for. A worker that returns wrong
+        // answers by default would be indistinguishable from a broken build.
+        let cli = Cli::try_parse_from(["node", "worker", "--id", "worker-1"]).unwrap();
+        let Role::Worker { faulty, .. } = cli.role else {
+            panic!("parsed as the wrong role");
+        };
+        assert!(!faulty);
+    }
+}

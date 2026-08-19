@@ -121,3 +121,123 @@ fn agent() -> ureq::Agent {
         .build()
         .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+    use std::thread;
+
+    use super::*;
+
+    #[test]
+    fn a_body_at_the_limit_is_read_whole() {
+        let payload = vec![7u8; 64];
+        let read = read_capped(&mut Cursor::new(payload.clone()), 64, "test body").unwrap();
+        assert_eq!(read, payload);
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_refused_rather_than_truncated() {
+        // The important half. `Read::take` truncates silently, and a truncated
+        // read is worse than a failed one everywhere this is used: a short
+        // server key still hashes to *something*, and a clipped message body
+        // may still decode into a plausible-looking message. Refusing is the
+        // only safe answer.
+        let error = read_capped(&mut Cursor::new(vec![7u8; 65]), 64, "server key").unwrap_err();
+
+        assert!(error.contains("server key"), "names the payload: {error}");
+        assert!(error.contains("64"), "names the limit: {error}");
+    }
+
+    #[test]
+    fn an_empty_body_is_not_an_error() {
+        // A POST with no body is malformed at the protocol layer, not here;
+        // this must hand back an empty vec so the decoder produces the useful
+        // message rather than "cannot read request body".
+        assert!(
+            read_capped(&mut Cursor::new(Vec::new()), 64, "request body")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Stands up a real server on an ephemeral port that answers each request
+    /// with a canned status and body, and hands back what it received. Real
+    /// sockets rather than a fake: the behaviour under test is how this module
+    /// reacts to an HTTP status, and a fake would be asserting against itself.
+    fn serving(replies: Vec<(u16, Vec<u8>)>) -> (String, thread::JoinHandle<Vec<Vec<u8>>>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = server.server_addr().to_ip().expect("an ip address").port();
+
+        let handle = thread::spawn(move || {
+            let mut received = Vec::new();
+            for (status, body) in replies {
+                let mut request = server.recv().expect("a request");
+                received.push(read_body(&mut request).expect("a readable body"));
+                respond(request, status, &body);
+            }
+            received
+        });
+
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    #[test]
+    fn get_returns_the_body_of_a_successful_response() {
+        let (url, server) = serving(vec![(200, b"server key bytes".to_vec())]);
+
+        assert_eq!(
+            get(&format!("{url}/keys/0xabc")).unwrap(),
+            b"server key bytes"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn get_refuses_a_non_success_instead_of_returning_its_body() {
+        // Task 2.9d. A 404 carries a body too, and a worker that got it back as
+        // a payload would hash "not found" and install it as the server key.
+        //
+        // Two things prevent that now: ureq treats a non-2xx as an error by
+        // default, and `get` checks the status again itself. That makes the
+        // explicit check redundant today -- deliberately so, since the
+        // behaviour must survive someone turning `http_status_as_error` off.
+        // This asserts the behaviour rather than either mechanism, so it holds
+        // whichever one is removed.
+        let (url, server) = serving(vec![(404, b"not found".to_vec())]);
+
+        let error = get(&format!("{url}/keys/0xdeadbeef")).unwrap_err();
+        assert!(error.contains("404"), "names the status: {error}");
+        assert!(
+            !error.contains("not found"),
+            "the error must not be the body dressed up as one: {error}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn post_delivers_its_body_and_reports_a_refusal() {
+        // 503 is what a worker returns when its job queue is full (task 2.9b).
+        // The coordinator has to see that as a failed dispatch, not a delivery.
+        let (url, server) = serving(vec![(200, b"ok".to_vec()), (503, b"queue full".to_vec())]);
+
+        post(&format!("{url}/jobs"), b"first dispatch".to_vec()).unwrap();
+        let error = post(&format!("{url}/jobs"), b"second dispatch".to_vec()).unwrap_err();
+        assert!(error.contains("503"), "names the status: {error}");
+
+        let received = server.join().unwrap();
+        assert_eq!(
+            received,
+            vec![b"first dispatch".to_vec(), b"second dispatch".to_vec()],
+            "the server must have received exactly what was posted"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_peer_is_an_error_rather_than_a_hang() {
+        // A worker that has gone away must surface inside the coordinator's
+        // deadline. Port 1 on loopback refuses immediately.
+        assert!(get("http://127.0.0.1:1/keys/0x00").is_err());
+        assert!(post("http://127.0.0.1:1/results", b"report".to_vec()).is_err());
+    }
+}

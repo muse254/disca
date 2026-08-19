@@ -1,3 +1,8 @@
+# Install with: pre-commit install
+#
+# Ordered cheapest-first, and `fail_fast` stops at the first failure, so a
+# misspelling or a formatting slip is reported in a second rather than after
+# clippy has finished compiling tfhe.
 fail_fast: true
 default_install_hook_types: [pre-commit]
 default_stages: [pre-commit]
@@ -10,13 +15,50 @@ repos:
         exclude: \.wat$
   - repo: local
     hooks:
+      # Formatting first: it is the only hook that can be satisfied by running
+      # one command, so failing here costs the least.
+      #
+      # Note that rust-toolchain.toml pins stable, and stable rustfmt ignores
+      # four of the five options in rustfmt.toml — imports_granularity,
+      # group_imports, format_code_in_doc_comments and error_on_unformatted are
+      # nightly-only, and are warned about but not applied. This hook enforces
+      # what stable rustfmt can enforce, which is less than the config asks for.
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # --all-features changes nothing today (nothing in the workspace is
+      # optional yet) and is here ahead of the branch that gates `logic_gates`
+      # and `--faulty` behind features, per task 2.11b: code behind an
+      # off-by-default feature is never compiled by an ordinary build, so
+      # nothing type-checks it and it rots. --all-targets extends that to tests
+      # and examples. --locked so a manifest edit committed without its
+      # lockfile update fails here rather than in CI.
       - id: cargo-check
         name: cargo check
-        entry: cargo check
+        entry: cargo check --workspace --all-targets --all-features --locked
         language: system
+        types: [rust]
         pass_filenames: false
+
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy
+        entry: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
         language: system
+        types: [rust]
+        pass_filenames: false
+
+      # Dependency and lockfile hygiene. Deliberately *not* `cargo update`:
+      # rewriting Cargo.lock on every commit is how the exact `tfhe` pin gets
+      # lost, and losing it breaks byte-reproducible evaluation silently — see
+      # the header of scripts/check-deps.sh. This checks the lockfile is in sync
+      # and the pin is intact, offline and in under a second.
+      - id: cargo-deps
+        name: dependency hygiene
+        entry: scripts/check-deps.sh
+        language: system
+        files: ^(Cargo\.(toml|lock)|.*/Cargo\.toml|scripts/(check-deps\.sh|lib/check_pins\.py))$
         pass_filenames: false

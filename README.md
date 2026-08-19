@@ -51,6 +51,60 @@ Tests: `cargo test --workspace`. Note that
 guards byte-reproducibility of evaluation, which M-of-N depends on and which an
 in-process test cannot check (see [architecture.md](docs/architecture.md) §3).
 
+## Checks
+
+CI runs these, and so can you — same commands, same flags, so a green laptop
+and a red pipeline cannot disagree about why:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+scripts/check-deps.sh          # lockfile in sync; tfhe still pinned exactly
+scripts/coverage.sh --open     # line coverage per crate, as a browsable report
+```
+
+`--all-features` is not decoration. A module behind an off-by-default feature is
+not compiled by an ordinary build, so nothing type-checks it and nothing runs
+its tests — it rots quietly while the coverage number stays flattering
+([tasks.md](docs/tasks.md) 2.11b).
+
+`--locked` is the other half of the `tfhe` pin. The exact version in the
+workspace manifest is what makes evaluation byte-reproducible
+([architecture.md](docs/architecture.md) §3); building against a lockfile cargo
+was allowed to rewrite would defeat it.
+
+### Coverage
+
+`scripts/coverage.sh` wraps [`cargo-llvm-cov`][llvm-cov] and writes
+`target/llvm-cov/html/index.html`.
+
+The floor is per crate, not one number for the workspace, and each floor carries
+its reason in `scripts/lib/coverage_report.py`. `primitives` is the execution
+core — pure functions with a checkable answer, and the thing an attestation is a
+claim about — so it is held high. Much of `node` is socket binding, thread
+spawning and blocking receive loops that only `scripts/run-local.sh` exercises;
+tests written to walk those lines would raise the number and assert nothing.
+`scripts/coverage.sh --check` applies the floors, and is what CI runs.
+
+[llvm-cov]: https://github.com/taiki-e/cargo-llvm-cov
+
+### Pre-commit hook
+
+Formatting, linting and dependency hygiene, before the commit rather than after
+the push. Install [`pre-commit`](https://pre-commit.com/) (`brew install
+pre-commit` on macOS), then:
+
+```sh
+pre-commit install
+```
+
+The hook deliberately does **not** run `cargo update`. Rewriting `Cargo.lock` on
+every commit is exactly how the exact `tfhe` pin gets lost, and losing it breaks
+byte-reproducible evaluation with no error — honest workers simply stop
+agreeing. `scripts/check-deps.sh` verifies the pin instead of moving it; run it
+with `--report` to see what an update *would* change, without changing anything.
+
 ## Status
 
 The execution core and the distributed layer work. The Ethereum bridge is
@@ -66,19 +120,8 @@ Built with XeLaTex.
 
 #### Pre-commit
 
-Install the [`pre-commit` CLI tool](https://pre-commit.com/), available via brew on macOS:
-
-```sh
-brew install pre-commit
-```
-
-Install the pre-commit hooks:
-
-```sh
-pre-commit install
-```
-
-This hook is necessary to ensure that the document is properly formatted and spell-checked.
+The same hook as [above](#pre-commit-hook) — it spell-checks the document as
+well as the Rust.
 
 #### XeLaTex
 

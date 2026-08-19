@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # `cargo audit` reads a database that changes without this repo changing, so
+  # the advisory job needs a clock of its own. Mondays, 06:00 UTC.
+  schedule:
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace on a failing FHE test is the difference between "it broke" and
+  # "it broke here"; the suite is small enough that the noise costs nothing.
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Cheap and independent of the build, so it fails in under a minute rather
+  # than after tfhe has finished compiling.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # rust-toolchain.toml pins stable, and stable rustfmt silently ignores
+      # four of the five options in rustfmt.toml (imports_granularity,
+      # group_imports, format_code_in_doc_comments, error_on_unformatted are all
+      # nightly-only). This gate therefore checks less than rustfmt.toml asks
+      # for. Enforcing the rest means running rustfmt from nightly, which is a
+      # separate decision: the tree does not currently satisfy those four
+      # options, so turning them on is a reformat, not a CI change.
+      - run: rustup component add rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+      # --all-features is a no-op today — nothing in the workspace is optional
+      # on `main` yet — and is here because task 2.11b asks for it ahead of the
+      # branch that gates `logic_gates` behind `boolean-circuits` and `--faulty`
+      # behind `fault-injection`. Code behind an off-by-default feature is never
+      # compiled by an ordinary build, so nothing type-checks it and it rots.
+      # --all-targets extends the same reach to tests, examples and benches.
+      #
+      # --locked so a manifest edit committed without its Cargo.lock update
+      # fails here rather than resolving to whatever is newest today; the tfhe
+      # pin is load-bearing (docs/architecture.md §3).
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  deps:
+    name: dependency hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # No build cache here on purpose: nothing in this job compiles the
+      # workspace. `cargo metadata` resolves, `cargo audit` reads Cargo.lock.
+      # A prebuilt binary, and deliberately the current release: the advisory
+      # database now carries CVSS 4.0 entries that cargo-audit before 0.22
+      # cannot parse, and it fails loading the database rather than reporting no
+      # advisories — a stale pin here looks like a broken dependency tree.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # Lockfile in sync, `tfhe` still pinned exactly, one tfhe in the graph,
+      # plus advisories and a read-only report of what could be updated. See the
+      # header of scripts/check-deps.sh for why this is not `cargo update`.
+      - run: scripts/check-deps.sh --report --audit
+
+  test:
+    name: build and test
+    runs-on: ubuntu-latest
+    # Generous, but the floor is compiling tfhe: the workspace sets
+    # opt-level = 3 for dependencies in dev and test profiles, without which the
+    # adder tests take ~8 minutes to *run* instead of seconds. First build on a
+    # cold cache is the slow one.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+
+      # Builds what would actually ship, with default features, so a release
+      # binary that does not link is caught here and not at a tag.
+      - name: build (default features)
+        run: cargo build --workspace --locked
+
+      # committee-tally and simple-arithmetic are Rust only so rustc can emit
+      # WASM from them; the committed .wasm files are what the tests evaluate.
+      # They build for the host from the workspace root — their
+      # .cargo/config.toml only applies to cargo invoked from inside their
+      # directory — but building them for wasm32 is what the demo actually
+      # depends on, so check that shape too.
+      - name: build the demo circuits for wasm32
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --release -p committee-tally -p simple-arithmetic \
+            --target wasm32-unknown-unknown --locked
+
+      # `primitives/tests/determinism_under_concurrency.rs` spawns concurrent
+      # child processes and is the guard on byte-reproducible evaluation. It
+      # runs here uninstrumented, which is the shape a worker actually runs in —
+      # the coverage job runs it again under instrumentation, and the two
+      # agreeing is part of the point.
+      - name: test
+        run: cargo test --workspace --all-features --locked
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup component add llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Coverage compiles with -C instrument-coverage, so it cannot share a
+          # cache with the ordinary build.
+          key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # Same script a developer runs locally, so a number here is reproducible
+      # there. --check enforces a floor per crate; the floors and the reasoning
+      # behind each live in scripts/lib/coverage_report.py.
+      - name: measure coverage
+        run: scripts/coverage.sh --check --lcov target/lcov.info
+
+      - name: upload the HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: target/llvm-cov/html/
+          retention-days: 14
+
+      - name: upload lcov
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: target/lcov.info
+          retention-days: 14
