@@ -14,7 +14,12 @@ license = "MIT OR Apache-2.0"
 clap = "4.5"
 wasmparser = "0.244.0"
 wast = "244.0.0"
-tfhe = { version = "1.5", features = ["boolean", "shortint", "integer"] }
+# Pinned exactly. Byte-reproducible evaluation depends on `setup_custom_fft_plan`
+# (see `pin_fft_plan` in node/src/main.rs), which is public but `#[doc(hidden)]`
+# and carries no stability promise, and on the polynomial size that
+# `ConfigBuilder::default()` selects. A minor bump could change either without
+# warning, and the symptom would be honest workers silently disagreeing.
+tfhe = { version = "=1.5.0", features = ["boolean", "shortint", "integer"] }
 primitives = { path = "primitives" }
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"

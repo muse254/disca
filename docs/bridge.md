@@ -92,16 +92,18 @@ Design notes:
   cheaper than on-chain signature verification. Signature-based attestation is
   an L1-ladder upgrade.
 - **The contract never verifies computation cryptography.** It verifies that M
-  of N registered workers agreed on `keccak256(resultCiphertext)`.
-  **This premise no longer holds.** It rested on FHE evaluation being
-  byte-reproducible, so that agreement implied correct evaluation with at most
-  N-M Byzantine workers tolerated. Measurement says otherwise: honest workers
-  given identical keys and inputs intermittently produce results that decrypt
-  the same but differ byte for byte, so agreement fails at random and
-  disagreement does not imply dishonesty. See `architecture.md` §3 for the
-  evidence and `attestation.md` for the cost of the alternatives. **Do not
-  implement `fulfillJob` against this paragraph until tasks 2.10a-c pick a
-  replacement scheme.**
+  of N registered workers agreed on `keccak256(resultCiphertext)`. Because FHE
+  evaluation is byte-reproducible *under the conditions in `architecture.md`
+  §3*, agreement implies correct evaluation with at most N-M Byzantine workers
+  tolerated (for the parts each worker ran).
+
+  Those conditions are load-bearing and belong in the worker registry, not just
+  in prose: the FFT plan must be pinned, every worker must share one CPU
+  architecture (x86 and ARM produce different bytes), and evaluation must be on
+  CPU rather than GPU. A worker that violates any of them disagrees with honest
+  workers while behaving honestly. Registration should record architecture and
+  reject a mismatch (task 2.10b); until it does, disagreement is evidence of
+  *divergence*, not of dishonesty, and must not feed slashing.
 - **Escrow pays the coordinator on fulfillment** and refunds the poster on
   timeout. No slashing in the demo; dishonest workers only waste their own time
   since they cannot forge agreement.

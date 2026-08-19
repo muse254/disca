@@ -157,11 +157,23 @@ fn main() {
 /// if the plan for that polynomial size is already initialised, and merely
 /// decompressing a server key initialises it.
 ///
-/// Two limits worth knowing. The plan is per polynomial size, so this covers
-/// the 2048 used by `ConfigBuilder::default()` and nothing else. And it makes
-/// results reproducible across *machines of the same architecture* — Zama
-/// document that outputs differ between x86 and ARM, so a mixed-ISA fleet will
-/// still disagree.
+/// Three ways this stops working, all silent:
+///
+/// * **Different polynomial size.** The plan is per size; 2048 is what
+///   `ConfigBuilder::default()` selects for the parameters this build pins.
+///   Changing parameters, or a tfhe-rs version that changes the default, leaves
+///   evaluation unpinned with no error — which is why `tfhe` is pinned to an
+///   exact version in the workspace manifest.
+/// * **Mixed CPU architectures.** Zama document that outputs differ between x86
+///   and ARM, so byte equality holds within an architecture and not across one.
+///   A mixed fleet disagrees no matter what is pinned.
+/// * **GPU evaluation.** The `gpu` feature switches the default to multi-bit
+///   parameters, which are documented as non-deterministic unless
+///   `with_deterministic_execution()` is set. This build is CPU-only.
+///
+/// A worker violating any of these disagrees with honest workers while behaving
+/// honestly, so disagreement is evidence of divergence rather than dishonesty
+/// until worker registration enforces them (task 2.10b).
 fn pin_fft_plan() {
     let fourier = PolynomialSize(2048).to_fourier_polynomial_size();
     setup_custom_fft_plan(Plan::new(

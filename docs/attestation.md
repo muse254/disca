@@ -151,7 +151,11 @@ population drifts. This is not one flaky machine.
 | 2 agreed, 1 diverged | 6 | Settled — **and logged an honest worker as an attestation disagreement** |
 | All 3 differed | 3 | **Job failed**, no quorum |
 
-So with zero dishonest participants: **25% of jobs fail outright, and 50% of
+These figures are **pre-fix** — measured before the FFT plan was pinned. They
+are kept because they are the evidence that motivated the investigation; see §6
+for the measurements after the fix.
+
+So with zero dishonest participants, unpinned: **25% of jobs fail outright, and 50% of
 jobs falsely accuse an honest worker of faulty attestation.** The disagreement
 warning — the mechanism's entire diagnostic output — is wrong half the time.
 
@@ -164,7 +168,8 @@ defaults, 8 runs:
 | `job settled result=93` | **2** |
 | `did not reach 2-of-3 agreement` | **6** |
 
-**The demo in the pull request description succeeds 25% of the time.** The
+**Unpinned, the demo succeeded 25% of the time.** (Pinned it settles 6 of 6 —
+§6.) The
 sample log in that description is a real run; it is also the minority case.
 
 ### 5d. The alternatives, costed against the same job
@@ -173,7 +178,8 @@ sample log in that description is a real run; it is also the minority case.
 |---|---|---|---|
 | Trust one worker | 0 | 1× (1.4 s) | Returns wrong answers silently. Not verification. |
 | Verifier re-executes | 1 extra evaluation (1.4 s) | 1× | Defeats the purpose — the verifier could have run the job |
-| **M-of-N on result bytes (current)** | **~48 µs** | **3× (≈3.0 s)** | **No — settles 25% of demo runs** |
+| **M-of-N on result bytes, FFT plan pinned (current)** | **~48 µs** | **3× (≈3.0 s)** | **Yes — settles 6 of 6 demo runs** |
+| M-of-N on result bytes, unpinned (what motivated this doc) | ~48 µs | 3× (≈3.0 s) | No — settled 25% of demo runs |
 | M-of-N on decrypted plaintext | ~75 ms × N ≈ **225 ms** | 3× (≈3.0 s) | Yes, if divergent results decrypt identically — see caveat below |
 | Optimistic challenge (L1) | 0 normally; 1 evaluation per challenge | 1× + challenges | Not built; needs a dispute window and stake |
 | ZK proof of evaluation (L2) | Not measurable | 1× | Not available for tfhe-rs |

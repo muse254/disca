@@ -229,10 +229,13 @@ numerically-equivalent algorithms and round a few coefficients differently.
 to 6 of 6. Full write-up in architecture.md §3.
 
 - [x] **2.10a Pin the FFT plan at node startup**, before anything touches a key.
-- [ ] **2.10b Require a homogeneous fleet.** Zama document that outputs differ
-      between x86 and ARM, so byte equality holds within an architecture, not
-      across. Worker registration should record and check architecture, and
-      `bridge.md` should say so.
+- [ ] **2.10b Enforce the reproducibility preconditions at registration.** Byte
+      equality holds only for workers sharing one CPU architecture (x86 and ARM
+      diverge), with the FFT plan pinned, evaluating on CPU (the `gpu` feature
+      selects multi-bit parameters that are non-deterministic without
+      `with_deterministic_execution()`). Registration should record and check
+      these; until it does, disagreement means divergence, not dishonesty, and
+      must not feed slashing. `bridge.md` §2 now states this.
 - [ ] **2.10c Keep the divergence path anyway.** Agreement can still fail for
       reasons we have not seen; a disputed job must stay a first-class outcome
       rather than an assertion.
