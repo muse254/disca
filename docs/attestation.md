@@ -37,13 +37,17 @@ without it there is no product.**
 
 ## 2. What M-of-N attestation is
 
-Two different mechanisms share this name. This one is *replicate and vote* —
-N workers each do the whole job and the coordinator accepts what M agree on, the
-same shape as triple modular redundancy in avionics. The other, *split a secret*
-(Shamir, threshold signatures, threshold decryption), divides work so no minority
-can act alone and says nothing about correctness. `architecture.md` §3 sets them
-side by side; the distinction matters because DISCA's roadmap uses the second and
-it does not replace the first.
+`N` is how many workers get the job; `M` is how many must return the same answer
+before it is accepted. Both are counts — nobody is "the M". The demo runs `N = 3`
+workers and requires `M = 2` to agree, so it tolerates one faulty worker.
+
+Two different mechanisms share the name. This one is *replicate and vote*: all
+`N` do the whole job, the same shape as triple modular redundancy in avionics.
+The other, *split a secret* (Shamir, threshold signatures, threshold
+decryption), divides work so fewer than `M` parties can do anything, and says
+nothing about correctness. `architecture.md` §3 sets them side by side; the
+distinction matters because DISCA's roadmap uses the second and it does not
+replace the first.
 
 
 The cheapest verification that needs no proof machinery: run the job more than

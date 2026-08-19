@@ -99,25 +99,42 @@ allocation, built in release.
 
 ### What "M-of-N" means here, and what it does not
 
-The notation covers two unrelated mechanisms, and this project uses both — so it
-is worth being explicit about which is which.
+**Both letters are counts, not parties.** `N` is how many workers are given the
+job. `M` is how many of them must return the *same* answer before the
+coordinator accepts it. Nobody is "the M" — it is a threshold.
+
+In `scripts/run-local.sh`: `N = 3` (three worker processes), `M = 2`
+(`--attesters 2`). Two workers return hash `0xda91…`, the third returns
+`0x5dad…`, two is enough, the job settles on `0xda91…` and the third is logged
+as disagreeing. Raise it to `--attesters 3` and that same run fails, because
+three workers no longer agree.
+
+Choosing `M` is a trade between two failure modes:
+
+- **Too low** — with `M <= N/2`, two different answers can each reach the
+  threshold. The coordinator refuses rather than picking one, because that state
+  means more workers are faulty than the scheme can tolerate.
+- **Too high** — `M = N` means one slow, crashed or unreachable worker blocks
+  every job. The scheme tolerates `N - M` faulty or missing workers, so `M = 2`
+  of `N = 3` tolerates exactly one.
+
+The two mechanisms that share this name:
 
 | | **Replicate and vote** (DISCA today) | **Split a secret** (roadmap) |
 |---|---|---|
-| Idea | N parties each do the whole job; accept what M agree on | Work is divided so no minority can act alone |
+| Idea | All `N` do the whole job; accept an answer once `M` of them return it | Work is divided so fewer than `M` parties can do nothing at all |
 | Answers | "Did the worker compute correctly?" | "Can one party decrypt on its own?" |
-| Cost | N× compute | Coordination |
+| Cost | `N`× compute | Coordination |
 | Familiar as | triple modular redundancy in avionics, Byzantine fault tolerance, oracle networks | Shamir's secret sharing, threshold signatures, Bitcoin multisig |
 
-L0 (§7) is the first kind: workers replicate an evaluation and the coordinator
-accepts the result M of them attest to. Zama's fhEVM uses the same construction —
+L0 (§7) is the first kind. Zama's fhEVM uses the same construction —
 `sns-worker` hashes the serialized ciphertext and a contract majority-votes the
 digest.
 
-The multi-key / threshold FHE in §2's roadmap is the second kind. It would remove
-the single key holder so no one party can decrypt, and it says **nothing** about
-whether a worker evaluated correctly. It is not an upgrade path from L0; a system
-with threshold decryption still needs L0, L1 or L2 on top. The rungs that
+The multi-key / threshold FHE in §2's roadmap is the second kind. It would
+remove the single key holder so no one party can decrypt, and it says **nothing**
+about whether a worker evaluated correctly. It is not an upgrade path from L0; a
+system with threshold decryption still needs L0, L1 or L2 on top. The rungs that
 actually replace replication are L1 (optimistic challenge) and L2 (ZK proof),
 because those verify computation rather than counting agreement.
 
