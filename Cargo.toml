@@ -8,7 +8,7 @@ authors = ["Osoro Bironga <fanosoro@gmail.com>"]
 edition = "2024"
 description = "Distributed Compute Automata"
 homepage = "https://github.com/muse254/disca"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [workspace.dependencies]
 clap = "4.5"

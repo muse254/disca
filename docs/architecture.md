@@ -1,6 +1,6 @@
 # DISCA Architecture — FHE Coprocessor for Ethereum
 
-Status: draft (pre-hackathon planning for ETHOnline 2026, Sept 4–16, Continuity track)
+Status: draft.
 
 This document defines the target architecture for turning DISCA from a
 single-process FHE evaluator into a **distributed FHE coprocessor for Ethereum**:
@@ -47,7 +47,7 @@ Circuit size is not a binding constraint on the demo.
 
 Hard consequences:
 
-1. **Single-key model for the hackathon.** One key holder per program. The key
+1. **Single-key model, for now.** One key holder per program. The key
    holder is the data owner (or a committee acting as one party). Multi-party
    inputs from mutually distrusting parties require multi-key FHE — explicitly
    future work (cf. Zama's threshold-KMS approach).
@@ -284,7 +284,7 @@ Hash disagreement → job marked disputed, escrow refunded (slashing is roadmap)
 
 ## 6. Distribution model
 
-- **Phase 1 (hackathon): redundant full execution.** Every worker evaluates the
+- **Phase 1 (current): redundant full execution.** Every worker evaluates the
   whole circuit. Distribution exists for *verifiability* (M-of-N attestation),
   not scale. Simple, honest, demoable on one machine with 3 processes.
 - **Phase 2 (stretch): circuit partitioning.** Split the linear `CircuitOp`
@@ -295,7 +295,7 @@ Hash disagreement → job marked disputed, escrow refunded (slashing is roadmap)
 
 | Level | Mechanism | Status |
 |---|---|---|
-| L0 | M-of-N worker attestation on deterministic execution + trusted key-holder reveal | Hackathon deliverable |
+| L0 | M-of-N worker attestation on deterministic execution + trusted key-holder reveal | Implemented |
 | L1 | Optimistic challenge window: anyone re-executes and disputes a result hash | Stretch |
 | L2 | ZK proof of correct homomorphic evaluation; threshold-FHE decryption; stake/slashing | Roadmap (whitepaper alignment) |
 

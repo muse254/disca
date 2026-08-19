@@ -411,7 +411,7 @@ determinism story or wrote it down.
 
 1. **Call `setup_custom_fft_plan` at worker start-up**, before touching the server key.
    Measured: 18/18 agreement, no slowdown. This restores L0 as designed and makes
-   `architecture.md` §3's options 1 and 3 unnecessary for the hackathon.
+   `architecture.md` §3's options 1 and 3 unnecessary for now.
 2. **Require a homogeneous worker fleet** (same ISA, and until §2b is tested, same core
    count), and say so in `architecture.md` §3 as an explicit trust-model assumption. This
    is what Zama does.

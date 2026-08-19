@@ -23,12 +23,37 @@ use tracing::{error, info, info_span, warn};
 use crate::protocol::{JobDispatch, JobOutcome, JobReport};
 use crate::transport;
 
-/// How a worker was told to behave. `Faulty` exists so the local end-to-end run
-/// can demonstrate that M-of-N attestation actually rejects something — a job
-/// where every worker agrees proves nothing about the mechanism.
+/// How a worker was told to behave.
+///
+/// Set once at startup from `--faulty` and never changed. It is deliberately
+/// local: it is not in `JobDispatch`, not in `JobReport`, and not inferable
+/// from anything on the wire, so the coordinator has to catch a faulty worker
+/// from its output alone. That is also how a real dishonest operator would
+/// work — they would change their own binary, not announce it — so the shape of
+/// the test matches the shape of the threat.
+///
+/// **The fault this models is the less likely one.** A wrong answer from a
+/// dishonest worker is the adversarial case, and today it is barely rational:
+/// there is no reward for participating and no slashing for lying, so a liar
+/// just wastes CPU and gets outvoted.
+///
+/// The divergence a deployment would actually hit first is *misconfiguration*,
+/// and we have already seen it: before the FFT plan was pinned, honest workers
+/// disagreed in 6 of 12 runs. To the coordinator that was indistinguishable
+/// from this enum's `Faulty` — same well-formed report, same wrong hash, same
+/// warning — but nobody was malicious. The realistic causes are all boring: a
+/// worker on ARM among x86 machines, a different tfhe version, a `gpu` build
+/// selecting non-deterministic parameters, or an older binary that never pinned
+/// the plan. None is checked at registration yet (task 2.10b), which is why
+/// `bridge.md` §2 treats disagreement as evidence of divergence rather than
+/// dishonesty, and why slashing must wait for those checks — otherwise it would
+/// punish the operator with the wrong CPU instead of the liar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Behaviour {
     Honest,
+    /// Only exists when the `fault-injection` feature is on, so a default
+    /// release build cannot be told to return a wrong answer.
+    #[cfg(feature = "fault-injection")]
     Faulty,
 }
 
@@ -56,6 +81,7 @@ pub fn run(config: Config) -> Result<(), String> {
         "worker listening"
     );
 
+    #[cfg(feature = "fault-injection")]
     if config.behaviour == Behaviour::Faulty {
         warn!(
             worker = %config.id,
@@ -252,9 +278,14 @@ fn evaluate(dispatch: &JobDispatch, behaviour: Behaviour) -> Result<wire::Sealed
 
     let result = match behaviour {
         Behaviour::Honest => result,
-        // Corrupt the value, not the encoding: the point is to produce a
-        // well-formed result that disagrees, which is exactly what a subtly
-        // broken or dishonest worker would emit.
+        // Corrupt the value, not the encoding, and do it here rather than
+        // earlier: every check above has already passed and the real evaluation
+        // has already run, so what leaves this function is a perfectly
+        // well-formed result that happens to be wrong. That is what a subtly
+        // broken or dishonest worker emits, and it is the case attestation has
+        // to catch — a malformed report would be rejected by decoding long
+        // before any voting happened, proving nothing.
+        #[cfg(feature = "fault-injection")]
         Behaviour::Faulty => &result + &result,
     };
 

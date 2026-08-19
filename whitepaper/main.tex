@@ -8,6 +8,19 @@
 \usepackage{tikz}
 \usepackage{listings}
 \usepackage{xcolor}
+
+% `listings` ships no Rust definition, so `language=Rust` raised
+% "Couldn't load requested language" and the sample program rendered unhighlighted.
+\lstdefinelanguage{Rust}{
+  morekeywords={as,break,const,continue,crate,dyn,else,enum,extern,false,fn,for,
+    if,impl,in,let,loop,match,mod,move,mut,pub,ref,return,self,Self,static,
+    struct,super,trait,true,type,unsafe,use,where,while,i8,i16,i32,i64,u8,u16,
+    u32,u64,usize,isize,bool,char,str,String,Vec,Option,Result},
+  sensitive=true,
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+}
 \usetikzlibrary{shapes,arrows,positioning,fit,backgrounds}
 
 \lstset{
@@ -95,7 +108,7 @@ This work represents a first of many steps, rather than a definitive solution.
 \subsection{Preliminaries}
 
 Methods through software are achieved through cryptography.
-More specifically we have Homomorphic Encryption (HE) and Fully Homomorphic Encryption (FHE).
+More specifically we have Homomorphic Encryption (HE) and Fully Homomorphic Encryption (FHE), the latter first shown to be constructible by Gentry~\cite{homomorphic_encryption}.
 There are also cryptographic hybrid solutions that combine multiple techniques, such as Homomorphic Encryption (HE) and Zero-Knowledge Proofs (ZKPs).
 
 However, it is important to note that the technology will be truly achieved when both cost and performance graphs trend downward, enabling practical deployment at scale.
@@ -121,13 +134,13 @@ This approach enables the construction of circuits from standard programming lan
 
 \subsubsection{Compilation to WebAssembly}
 
-Programs written in high-level languages (Rust, C/C++, Go, etc.) are first compiled to WebAssembly format.
+Programs written in high-level languages (Rust, C/C++, Go, etc.) are first compiled to WebAssembly format~\cite{wasm_spec}.
 This compilation step is crucial for several reasons:
 
 \begin{itemize}
     \item \textbf{WASM Stack Machine Standard:} We use the WASM stack machine standard to create our FHE circuits.
     The stack-based architecture provides a clean, predictable execution model that maps well to homomorphic encryption operations.
-    Each stack operation can be directly translated into FHE circuit gates.
+    Each stack operation translates to a homomorphic operation over encrypted values; which operations, and why not gate networks, is the subject of Section 2.2.
 
     \item \textbf{Simple Register Model:} WASM's stack-based execution model is simpler than register-based architectures, making it easier to reason about and transform into FHE circuits.
     The explicit stack operations eliminate the need to track register state across operations.
@@ -167,7 +180,7 @@ The WAT format serves several critical purposes in the circuit design process:
 To demonstrate the circuit design approach, we provide an oversimplified example program that implements basic arithmetic operations.
 The sample program includes three simple functions: \texttt{add}, \texttt{multiply}, and \texttt{subtract}.
 
-This oversimplified example demonstrates how basic arithmetic operations are transformed into stack-based instructions that can be mapped to FHE circuit gates.
+This oversimplified example demonstrates how basic arithmetic operations are transformed into stack-based instructions that map onto homomorphic operations.
 Each function is compiled to WASM and converted to WAT, providing a clear mapping from high-level operations to stack-based instructions.
 Note that this example is intentionally simplified for the purpose of this paper; typical programs are much more complex, involving control flow, state management, loops, conditionals, and multi-step computations with intermediate values.
 
@@ -231,12 +244,221 @@ For our arithmetic example, removing the compiler-generated metadata yields a si
 
 After generation of the final WAT file, the WebAssembly Standard, the text format in particular, is effectively our Intermediate Representation (IR).
 We will not be using WebAssembly directly, but rather its instruction set as our IR.
-This IR can now be decomposed into FHE circuits, where each WebAssembly instruction maps to corresponding homomorphic operations.
+This IR can now be evaluated homomorphically, each WebAssembly instruction mapping to a corresponding operation over encrypted values.
 
 The WAT representation clearly shows how each function is decomposed into stack operations.
 For example, the \texttt{add} function uses \texttt{local.get} instructions to push parameters onto the stack, followed by \texttt{i32.add} to perform the addition.
 Similarly, \texttt{subtract} and \texttt{multiply} follow the same pattern with their respective operations (\texttt{i32.sub}, \texttt{i32.mul}).
-These stack-based instructions provide a clear foundation for mapping to FHE circuit gates, where each operation can be represented as a homomorphic computation over encrypted values.
+These stack-based instructions provide a clear foundation for mapping to homomorphic computation over encrypted values, one operation at a time.
+
+\subsection{Evaluation Strategy}
+
+The IR fixes what a program means; it does not fix how each instruction is evaluated under encryption.
+Two routes were available, and the choice between them shapes both performance and what programs can express.
+
+\textbf{Gate composition.} Each integer operation is decomposed into boolean gates over single encrypted bits: an addition becomes a chain of full adders, each built from \texttt{XOR} and \texttt{AND} over one-bit ciphertexts.
+This is the classical boolean-circuit view of FHE, and it is the route we implemented first.
+
+\textbf{Native integer operations.} The evaluation library exposes arithmetic and comparison directly on encrypted integers held in a radix representation, and performs the gate-level work internally.
+
+Measured in release against an implementation of the TFHE scheme~\cite{tfhe_scheme,tfhe_rs} with default parameters:
+
+\begin{center}
+\begin{tabular}{lr}
+\hline
+Native 32-bit encrypted addition & 225 ms \\
+Twelve single-bit adder cases by gate composition, plus two key generations & 7.28 s \\
+\hline
+\end{tabular}
+\end{center}
+
+Removing roughly 1.4 seconds of key generation leaves about 0.5 seconds per single-bit case, where a case is two gate operations for a half adder or five for a full adder.
+A 32-bit ripple-carry adder is thirty-two chained full adders, on the order of one hundred and sixty gate operations.
+\textbf{One bit through gate composition therefore costs more than thirty-two bits through the integer interface.}
+The radix representation batches and parallelises work that a carry chain serialises.
+
+DISCA evaluates through the integer interface.
+The gate implementation is retained as a documented reference rather than deleted, since it remains the starting point for bit-level operations the integer interface does not expose, but it is not compiled into any binary.
+
+The consequence for the IR is direct: each instruction maps to one homomorphic operation rather than to a gate network.
+Measured costs of the operations the instruction set uses:
+
+\begin{center}
+\begin{tabular}{lr}
+\hline
+Addition & 225 ms \\
+Subtraction & 265 ms \\
+Multiplication & 2.04 s \\
+Comparison & 141 ms \\
+Selection & 200 ms \\
+\hline
+\end{tabular}
+\end{center}
+
+Multiplication costs roughly nine times an addition.
+Circuit shape therefore dominates: choosing an algorithm that compares and selects rather than multiplies is worth more than any tuning of the evaluator, which spends effectively all of its time inside these operations.
+
+\subsection{Constraints on Expressible Programs}
+
+A node evaluating under encryption cannot branch on an encrypted condition.
+It holds ciphertexts and cannot learn which way a test went, so both sides of a conditional must be evaluated and combined with a selection operation.
+The IR is consequently a straight-line sequence: no control flow, no addressable memory.
+
+This is a property of the model rather than a limitation of the front end, and it imposes two requirements on source programs.
+Loops must be fully unrolled at compile time, and data-dependent branches must be flattened into selections.
+
+In practice an optimising compiler performs both transformations without assistance.
+Compiling a tally over a fixed-size array with \texttt{rustc} 1.96, four separate formulations---an expression-level selection tree, a mutable accumulator, a \texttt{for} loop over a fixed array, and a threshold count---all reduce to straight-line sequences of \texttt{local.get}, \texttt{local.tee}, \texttt{i32.gt\_s}, \texttt{i32.add} and \texttt{select}.
+The loop is unrolled entirely.
+
+The same sources compiled without optimisation are rejected.
+Unoptimised output spills locals to a linear-memory stack frame through \texttt{global.get} and \texttt{i32.store}, which a circuit model has no way to represent.
+The practical rule for programs is therefore: fixed arity, fixed-size data, no allocation, and optimisations enabled.
+
+\section{Verification}
+
+Fully homomorphic encryption provides confidentiality, not integrity.
+A node returns a ciphertext, and nobody who receives it can determine whether it is the right one.
+Each party is helpless for a different reason: a consumer holds a ciphertext and no key; a chain cannot re-execute homomorphic evaluation; a coordinator sees only ciphertext.
+Even the key holder cannot detect a corrupted result, because decrypting a well-formed but incorrect ciphertext yields an integer rather than an error.
+
+An unverified FHE computer therefore returns numbers that nobody has grounds to believe.
+Verification is not hardening applied to a working system; without it there is no result worth reading.
+
+\subsection{M-of-N Attestation}
+
+DISCA establishes correctness by replication.
+The same job is dispatched to several nodes, and a result is accepted once enough of them independently return the same answer.
+
+Both letters are counts rather than parties.
+$N$ is how many nodes are given the job; $M$ is how many must return the identical answer before it is accepted.
+The scheme tolerates $N - M$ faulty or absent nodes, and the choice of $M$ trades two failure modes against each other.
+Where $M \leq N/2$, two different answers can each reach the threshold; that state means more nodes are faulty than the scheme tolerates, and the correct response is to refuse rather than to select between them.
+Where $M = N$, a single slow or unreachable node blocks every job.
+
+To make this concrete, consider a job dispatched to three nodes with the threshold set to two.
+Each node evaluates the circuit independently and returns a hash of its result ciphertext:
+
+\begin{verbatim}
+node A   ->  0xda91574b...4dde
+node B   ->  0xda91574b...4dde
+node C   ->  0x5dad1d95...ce75
+\end{verbatim}
+
+Two nodes returned identical bytes, the threshold is met, and the result behind that hash is accepted.
+The third is recorded as disagreeing.
+No node was told what to produce and none communicated with the others; A and B match because they independently computed the same ciphertext, and the coordinator identifies C from the evidence rather than from any prior knowledge of which node might be faulty.
+
+Raising the threshold to three makes the same job fail: unanimity is unreachable while one node disagrees, and the correct outcome is no result rather than a result two nodes vouch for and a third contradicts.
+That is the trade in the other direction---a stricter threshold buys confidence at the cost of tolerating nothing.
+
+Two unrelated mechanisms share this notation, and the distinction matters because DISCA's roadmap uses the second:
+
+\begin{center}
+\begin{tabular}{lll}
+\hline
+ & Replicate and vote & Split a secret \\
+\hline
+Idea & All $N$ perform the whole job & Work divided among parties \\
+Question answered & Did the node compute correctly? & Can one party act alone? \\
+Cost & $N \times$ computation & Coordination \\
+Instances & Modular redundancy, & Secret sharing, \\
+ & Byzantine fault tolerance~\cite{byzantine_generals} & threshold signatures~\cite{shamir_secret_sharing} \\
+\hline
+\end{tabular}
+\end{center}
+
+Threshold decryption, discussed later as future work, is the second kind.
+It would remove the single key holder so that no individual party can decrypt, and it says nothing whatever about whether a node evaluated correctly.
+It is not an upgrade path from replication; a system with threshold decryption still requires a correctness mechanism alongside it.
+
+\subsection{The Reproducibility Requirement}
+
+Agreement is evidence of correctness only if honest nodes are guaranteed to produce identical output.
+Comparing results by hash makes this requirement exact: two honest nodes evaluating the same circuit over the same input ciphertexts must produce byte-identical results.
+
+This does not hold automatically, and the reason is instructive.
+Evaluation libraries select among numerically equivalent Fast Fourier Transform algorithms by benchmarking them at first use and caching the winner for the lifetime of the process.
+The winner therefore depends on machine load at that instant.
+Those algorithms compute the same transform but group their constituent operations differently, and floating-point addition is not associative because every operation rounds.
+A coefficient near a rounding boundary consequently lands one unit either side depending on the ordering.
+
+The step that surprises is why a different algorithm changes the result at all, given that all of them compute the same transform.
+The answer is that floating-point addition is not associative~\cite{floating_point}.
+Every operation rounds to the nearest representable value, so regrouping the same additions can change the answer:
+
+\begin{verbatim}
+(1.0 + 1e16) - 1e16  =  0.0     the 1.0 is lost to rounding
+1.0 + (1e16 - 1e16)  =  1.0     it survives
+\end{verbatim}
+
+This is not confined to contrived magnitudes.
+Summing the same sixty-four values sequentially and pairwise differs in the final bit:
+
+\begin{verbatim}
+sequential:  89616922.12479763
+pairwise  :  89616922.12479764
+\end{verbatim}
+
+The atomic step of a Fast Fourier Transform~\cite{cooley_tukey} is the \emph{butterfly}: given two values and a twiddle factor $w$, it produces $a + wb$ and $a - wb$.
+A transform over two thousand and forty-eight points is thousands of these arranged in stages, and the competing algorithms differ precisely in how those stages group---which partial sums form first, and how they nest.
+Regrouping is exactly what the examples above show to be unsafe in floating point.
+
+Homomorphic evaluation uses these transforms for polynomial multiplication: integer torus coefficients are converted to floating point, multiplied in the frequency domain, and converted back.
+That final conversion rounds, so a coefficient near a boundary lands on one integer under one grouping and its neighbour under another.
+
+The resulting ciphertext remains valid and decrypts to the correct value---the noise budget absorbs a one-unit difference---but its bytes differ, and bytes are what a hash observes.
+The resulting difference is invisible to decryption and decisive to a hash, which is why the failure is so easy to miss: every divergent run still decrypted to the correct answer.
+
+Left unaddressed, honest nodes disagree intermittently and no job settles.
+Measured across twelve runs with every node behaving honestly, and again after fixing the algorithm selection in advance:
+
+\begin{center}
+\begin{tabular}{lrr}
+\hline
+Outcome, all nodes honest & Unfixed & Fixed \\
+\hline
+All three agreed, settled cleanly & 3 & 12 \\
+Settled, but reported an honest node as disagreeing & 6 & 0 \\
+Failed, no threshold reached & 3 & 0 \\
+\hline
+\end{tabular}
+\end{center}
+
+A quarter of jobs failed outright and half incorrectly accused an honest node, which would make any penalty built on that signal punish honest participants.
+Fixing the selection removes the divergence at no measurable cost in evaluation time.
+
+The requirement has a security counterpart in the literature.
+Smart and Walter~\cite{deterministic_tfhe} show that the standard security notion for FHE under a decryption oracle ordinarily calls for a \emph{randomised} evaluation procedure, and that this randomisation can be removed for TFHE in the random oracle model.
+Deterministic evaluation is therefore something a deployment may legitimately want and something the theory can accommodate; the divergence described above is a separate, purely implementational matter, since no randomness is involved in it at all.
+
+Byte equality is therefore conditional, and the conditions belong in node registration rather than in documentation.
+Nodes must share a processor architecture, since implementations differ between instruction sets; must fix the transform selection identically; and must evaluate on the same class of hardware, since accelerated backends select parameters that are not reproducible at all.
+A node violating any of these disagrees with honest nodes while behaving honestly.
+Until registration enforces them, \textbf{disagreement is evidence of divergence rather than of dishonesty}, and cannot support penalties.
+
+\subsection{Verification Ladder}
+
+Replication is the first rung of a ladder, and it is worth being precise about what it costs and what it does not provide.
+
+\begin{center}
+\begin{tabular}{lll}
+\hline
+Level & Mechanism & Verifies \\
+\hline
+L0 & Replication with $M$-of-$N$ agreement & Agreement between nodes \\
+L1 & Optimistic challenge window & Computation, on dispute \\
+L2 & Proof of correct evaluation & Computation, always \\
+\hline
+\end{tabular}
+\end{center}
+
+The comparison step at L0 is essentially free: hashing and comparing a result costs approximately 48 microseconds against a job of roughly three seconds, or 0.002 percent.
+The entire cost of the mechanism is the replication itself, $N$ times the computation.
+
+L0's limitation is that it verifies agreement rather than computation.
+It cannot distinguish a dishonest node from a misconfigured one, which is why the homogeneity requirements above are load-bearing.
+L1 and L2 verify the computation itself, and would additionally remove those requirements, since a challenger re-executing or a proof verifying does not depend on two machines producing identical bytes.
 
 \section{References}
 

@@ -1,3 +1,58 @@
+//! FHE arithmetic built from logic gates — the route DISCA did **not** take.
+//!
+//! This module composes half- and full-adders from `bit_and` / `bit_xor` / `bit_or`
+//! over `FheUint8`, one encrypted bit per ciphertext. It is the *boolean-circuit*
+//! approach to FHE: express everything as gates, then evaluate the gates.
+//!
+//! # Why it exists
+//!
+//! It is what the whitepaper's circuit-design section describes — "each stack
+//! operation can be directly translated into FHE circuit gates" — and it was
+//! written first, before the evaluator existed. Nothing in the evaluation path
+//! calls it. `DiscaFunction::run` uses tfhe's high-level integer API instead:
+//! `&a + &b` on `FheInt32`, `FheOrd::gt`, `IfThenElse::if_then_else`.
+//!
+//! # Why the integer API won
+//!
+//! Cost, by roughly two orders of magnitude. Measured in release:
+//!
+//! | | Measured |
+//! |---|---|
+//! | Native `FheInt32` addition (32 bits) | **225 ms** |
+//! | This module's truth-table tests: 12 single-bit adder cases + 2 keygens | **7.28 s** |
+//!
+//! Backing out the ~1.4 s of key generation leaves roughly 0.5 s per single-bit
+//! adder case, where a case is 2 gate operations (half-adder) or 5 (full-adder).
+//! A 32-bit ripple-carry adder is 32 chained full-adders — on the order of 160
+//! gate operations, so tens of seconds, against 225 ms for the native operation
+//! that does the whole 32-bit addition. **One bit through this module costs more
+//! than 32 bits through the integer API.** tfhe's radix representation batches
+//! and parallelises work that gate composition serialises through a carry chain.
+//!
+//! That extrapolation is arithmetic on the two measured rows, not a benchmark of
+//! a 32-bit adder built from these gates — nobody has run one.
+//!
+//! # Why it is kept
+//!
+//! As the documented alternative rather than as clutter. Two things it would be
+//! the starting point for: bit-level operations the integer API does not expose,
+//! and any future work on circuit privacy or custom gate sets where controlling
+//! the gate sequence matters. Deleting it would leave the whitepaper describing
+//! an approach with no implementation anywhere in the repo.
+//!
+//! # Not compiled by default
+//!
+//! Behind the `boolean-circuits` feature, so it is never linked into a binary.
+//! Its truth-table tests were also ~7.3 s of the primitives suite — about a
+//! third of it — spent guarding code nothing calls.
+//!
+//! ```sh
+//! cargo test -p primitives --features boolean-circuits
+//! ```
+//!
+//! Because it is off by default it will not be type-checked by an ordinary
+//! build, so CI should include `--all-features` to keep it from rotting.
+
 use tfhe::FheUint8;
 
 pub fn bit_and(a: &FheUint8, b: &FheUint8) -> FheUint8 {

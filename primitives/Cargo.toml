@@ -6,6 +6,12 @@ edition.workspace = true
 description.workspace = true
 homepage.workspace = true
 
+[features]
+# The gate-composition route to FHE arithmetic (`logic_gates`). Off by default,
+# so it is never compiled into a binary — nothing in the evaluation path uses
+# it. Enable it to build or test that module; see its docs for why it is kept.
+boolean-circuits = []
+
 [dependencies]
 tfhe = { workspace = true }
 wasmparser = { workspace = true }

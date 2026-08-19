@@ -9,8 +9,37 @@
 //! a worker reports to a coordinator, so they are shaped like job telemetry
 //! from the start. `RUST_LOG` sets verbosity — `debug` adds per-circuit
 //! evaluation spans, `trace` adds per-opcode timings.
+//!
+//! # Assumptions this binary makes
+//!
+//! None of these are enforced yet. They are listed because a violation shows up
+//! as workers disagreeing or a job settling on something it should not, rather
+//! than as anything failing loudly.
+//!
+//! * **Every worker runs the same build on the same CPU architecture.** Byte
+//!   equality of results is what M-of-N compares, and it holds within an
+//!   architecture, not across one — Zama document that x86 and ARM diverge. A
+//!   different tfhe version, a `gpu` build, or a binary that never pinned the
+//!   FFT plan diverges the same way. Registration should check this and does
+//!   not (task 2.10b), so **disagreement currently means divergence, not
+//!   dishonesty**, and must not feed slashing.
+//! * **The `ConfigBuilder::default()` polynomial size is 2048.** `pin_fft_plan`
+//!   hardcodes it and there is no public accessor to check against, which is
+//!   why `tfhe` is pinned to an exact version.
+//! * **The coordinator is honest about liveness but not trusted for results.**
+//!   It can stall a job — the escrow refund path covers that — but cannot forge
+//!   one, because the attestation hash has to be one M workers independently
+//!   produced.
+//! * **Workers are reachable and identified by address.** Attestation tokens
+//!   bind a report to the dispatch that authorised it, which stops one worker
+//!   reporting M times. They do **not** make a worker unimpersonable to anyone
+//!   who has seen its token; that needs per-worker signing keys
+//!   (`architecture.md` §11 Q3).
+//! * **One key holder per program, currently the coordinator process.** The
+//!   real design separates them; `KeyHolder` in `coordinator.rs` marks the seam.
 
 mod coordinator;
+#[cfg(debug_assertions)]
 mod demo;
 mod protocol;
 mod transport;
@@ -83,14 +112,50 @@ enum Role {
         #[arg(long)]
         id: String,
 
-        /// Deliberately return a wrong result. Exists so the local run can show
-        /// M-of-N rejecting something — a job where every worker agrees
-        /// demonstrates nothing about the mechanism.
+        /// Deliberately return a wrong result.
+        ///
+        /// This is fault injection, not mocking: the worker still fetches and
+        /// verifies the real server key, validates the real bytecode, checks
+        /// input commitments and performs the real homomorphic evaluation. Only
+        /// the answer is corrupted, at the last step before sealing. From
+        /// outside it is indistinguishable from an honest worker — same
+        /// timings, same well-formed report — which is the point.
+        ///
+        /// **What it buys.** A run where every worker agrees is
+        /// indistinguishable from a run with no verification at all: you see
+        /// `job settled` either way. Only a disagreeing worker shows that the
+        /// mechanism does anything. Pairing this with `HONEST=1` gives both
+        /// halves — a detector that never fires and one that always fires would
+        /// each pass a single test.
+        ///
+        /// **What stays honest.** The fault is injected; the detection is not.
+        /// Nothing tells the coordinator which worker is faulty — this flag is
+        /// local to one process and appears nowhere in the protocol. The
+        /// coordinator groups reports by hash and names the odd one out from
+        /// the evidence. Before the FFT plan was pinned it regularly accused
+        /// *honest* workers, which is how that bug surfaced; a coordinator with
+        /// privileged knowledge of the answer could not have made that mistake.
+        ///
+        /// **What it does not cover.** Exactly one fault mode: a well-formed
+        /// but wrong answer. Not a crash, a hang, garbage bytes, or a worker
+        /// that diverges only on some jobs. And notably not the fault a real
+        /// deployment would hit first — see `Behaviour` in `worker.rs`.
+        ///
+        /// Requires the `fault-injection` feature, so a default release build
+        /// has no way to return a wrong answer on purpose.
+        #[cfg(feature = "fault-injection")]
         #[arg(long)]
         faulty: bool,
     },
 
     /// Run the execution core in a single process, no network.
+    ///
+    /// Debug builds only. It is a development aid — the quickest way to tell
+    /// whether a failure is in the execution core or in the transport — and it
+    /// also acts as the key holder, encrypting and decrypting in the same
+    /// process. That is exactly the separation a deployment must keep, so the
+    /// role has no business existing in a release binary.
+    #[cfg(debug_assertions)]
     Demo,
 }
 
@@ -121,18 +186,27 @@ fn main() {
             bind,
             coordinator,
             id,
+            #[cfg(feature = "fault-injection")]
             faulty,
-        } => worker::run(worker::Config {
-            bind,
-            coordinator,
-            id,
-            behaviour: if faulty {
+        } => {
+            #[cfg(feature = "fault-injection")]
+            let behaviour = if faulty {
                 worker::Behaviour::Faulty
             } else {
                 worker::Behaviour::Honest
-            },
-        }),
+            };
+            #[cfg(not(feature = "fault-injection"))]
+            let behaviour = worker::Behaviour::Honest;
 
+            worker::run(worker::Config {
+                bind,
+                coordinator,
+                id,
+                behaviour,
+            })
+        }
+
+        #[cfg(debug_assertions)]
         Role::Demo => demo::run(),
     };
 
