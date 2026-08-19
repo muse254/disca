@@ -97,6 +97,30 @@ allocation, built in release.
 | Worker nodes | Ciphertexts, circuit segment | Plaintext | ≤ threshold may lie about results; M-of-N attestation catches it |
 | Chain / observers | Commitments, bytecode hash, result commitment | Plaintext | — |
 
+### What "M-of-N" means here, and what it does not
+
+The notation covers two unrelated mechanisms, and this project uses both — so it
+is worth being explicit about which is which.
+
+| | **Replicate and vote** (DISCA today) | **Split a secret** (roadmap) |
+|---|---|---|
+| Idea | N parties each do the whole job; accept what M agree on | Work is divided so no minority can act alone |
+| Answers | "Did the worker compute correctly?" | "Can one party decrypt on its own?" |
+| Cost | N× compute | Coordination |
+| Familiar as | triple modular redundancy in avionics, Byzantine fault tolerance, oracle networks | Shamir's secret sharing, threshold signatures, Bitcoin multisig |
+
+L0 (§7) is the first kind: workers replicate an evaluation and the coordinator
+accepts the result M of them attest to. Zama's fhEVM uses the same construction —
+`sns-worker` hashes the serialized ciphertext and a contract majority-votes the
+digest.
+
+The multi-key / threshold FHE in §2's roadmap is the second kind. It would remove
+the single key holder so no one party can decrypt, and it says **nothing** about
+whether a worker evaluated correctly. It is not an upgrade path from L0; a system
+with threshold decryption still needs L0, L1 or L2 on top. The rungs that
+actually replace replication are L1 (optimistic challenge) and L2 (ZK proof),
+because those verify computation rather than counting agreement.
+
 **Deterministic evaluation property — holds, but only once the FFT plan is
 pinned.**
 
