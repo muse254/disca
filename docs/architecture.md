@@ -97,18 +97,135 @@ allocation, built in release.
 | Worker nodes | Ciphertexts, circuit segment | Plaintext | ≤ threshold may lie about results; M-of-N attestation catches it |
 | Chain / observers | Commitments, bytecode hash, result commitment | Plaintext | — |
 
-**Deterministic evaluation property:** tfhe-rs evaluation *and* compression are
-deterministic given the same input ciphertexts (randomness exists only at
-encryption time). Two honest workers executing the same circuit on the same
-inputs produce *byte-identical* compressed result ciphertexts. This makes M-of-N
-result-hash matching a meaningful, cheap correctness check without any ZK
-machinery.
+### What "M-of-N" means here, and what it does not
 
-Both halves are verified rather than assumed — `results_are_deterministic` and
-`compression_is_deterministic` in `primitives/src/wire.rs`. Compression is
-included because the attested hash covers the compressed blob, which is what
-lets the bridge contract verify the ciphertext it emits against the attestation
-(see bridge.md §5a).
+**Both letters are counts, not parties.** `N` is how many workers are given the
+job. `M` is how many of them must return the *same* answer before the
+coordinator accepts it. Nobody is "the M" — it is a threshold.
+
+In `scripts/run-local.sh`: `N = 3` (three worker processes), `M = 2`
+(`--attesters 2`). Two workers return hash `0xda91…`, the third returns
+`0x5dad…`, two is enough, the job settles on `0xda91…` and the third is logged
+as disagreeing. Raise it to `--attesters 3` and that same run fails, because
+three workers no longer agree.
+
+Choosing `M` is a trade between two failure modes:
+
+- **Too low** — with `M <= N/2`, two different answers can each reach the
+  threshold. The coordinator refuses rather than picking one, because that state
+  means more workers are faulty than the scheme can tolerate.
+- **Too high** — `M = N` means one slow, crashed or unreachable worker blocks
+  every job. The scheme tolerates `N - M` faulty or missing workers, so `M = 2`
+  of `N = 3` tolerates exactly one.
+
+The two mechanisms that share this name:
+
+| | **Replicate and vote** (DISCA today) | **Split a secret** (roadmap) |
+|---|---|---|
+| Idea | All `N` do the whole job; accept an answer once `M` of them return it | Work is divided so fewer than `M` parties can do nothing at all |
+| Answers | "Did the worker compute correctly?" | "Can one party decrypt on its own?" |
+| Cost | `N`× compute | Coordination |
+| Familiar as | triple modular redundancy in avionics, Byzantine fault tolerance, oracle networks | Shamir's secret sharing, threshold signatures, Bitcoin multisig |
+
+L0 (§7) is the first kind. Zama's fhEVM uses the same construction —
+`sns-worker` hashes the serialized ciphertext and a contract majority-votes the
+digest.
+
+The multi-key / threshold FHE in §2's roadmap is the second kind. It would
+remove the single key holder so no one party can decrypt, and it says **nothing**
+about whether a worker evaluated correctly. It is not an upgrade path from L0; a
+system with threshold decryption still needs L0, L1 or L2 on top. The rungs that
+actually replace replication are L1 (optimistic challenge) and L2 (ZK proof),
+because those verify computation rather than counting agreement.
+
+**Deterministic evaluation property — holds, but only once the FFT plan is
+pinned.**
+
+M-of-N in §7 assumes two honest workers executing the same circuit over the same
+input ciphertexts produce *byte-identical* results, so agreement on
+`keccak256(result)` is evidence of correct evaluation. Out of the box that is
+false, and the reason is not what it looks like.
+
+**It is not randomness.** `Fft::new` builds every plan with
+`Method::Measure(Duration::from_millis(10))`: tfhe-rs times several
+numerically-equivalent FFT algorithms at first use and keeps whichever won *on
+that process, under that machine load*. The algorithms associate the
+floating-point butterflies differently, a few torus coefficients round the other
+way, and the ciphertext differs while the plaintext does not. The chosen plan is
+cached in a `OnceLock`, so a process is self-consistent forever — which is
+exactly why an in-process determinism test passes while separate workers
+disagree, and why a whole round of concurrent workers can drift together (they
+benchmark under the same contention).
+
+#### Why a different FFT algorithm changes the bytes
+
+A *butterfly* is the atomic step of an FFT: take two values and a twiddle factor
+`w`, produce `a + w·b` and `a - w·b`. Drawn as a dataflow diagram the inputs
+cross over to the outputs, which is where the name comes from. A 2048-point FFT
+is thousands of these arranged in stages.
+
+`Dif4`, radix-2, decimation-in-time and the rest all compute the *same*
+mathematical transform. What differs is the order and grouping of those
+butterflies — which partial sums form first, and how they nest. In exact
+arithmetic that would not matter, because addition is associative. In floating
+point it is not, because every operation rounds:
+
+```
+(1.0 + 1e16) - 1e16  =  0.0     <- the 1.0 is lost to rounding
+1.0 + (1e16 - 1e16)  =  1.0     <- it survives
+```
+
+TFHE uses FFTs to make polynomial multiplication fast during bootstrapping:
+integer torus coefficients go out to floating point, get multiplied in the
+frequency domain, and come back as integers. That last conversion rounds, so a
+coefficient sitting near a boundary can land on `k` under one ordering and
+`k ± 1` under another. The result is still a perfectly valid ciphertext — the
+noise budget absorbs a one-unit wobble, which is why every divergent run still
+decrypted to the correct answer — but the bytes differ, and the bytes are what
+`keccak256` sees.
+
+The full chain: **different algorithm chosen → different butterfly ordering →
+different rounding → a torus coefficient off by one → different ciphertext bytes
+→ different attestation hash → no quorum.**
+
+Full investigation, including two wrong diagnoses before the FFT plan was
+identified — leftover processes, then threading — is in
+[PR #9](https://github.com/muse254/disca/pull/9). Worth reading if you need the
+reasoning rather than the conclusion; the dead ends are the part that is hard to
+reconstruct later.
+
+**The fix is one call before anything touches a key**, `pin_fft_plan` in
+`node/src/main.rs`, using the public `setup_custom_fft_plan` demonstrated in
+tfhe-rs's own `examples/manual_fft.rs`. Measured on the demo circuit, three
+concurrent processes with identical keys and inputs:
+
+| | rounds unanimous (of 6) | demo settle rate |
+|---|---|---|
+| unpinned | 1 | 2 of 8 |
+| **pinned** | **6** | **6 of 6** |
+
+No measurable slowdown. With it pinned, the `attestation disagreement` warning
+fires only on the genuinely faulty worker; unpinned it accused honest workers
+more often than the faulty one.
+
+Three limits to keep in view:
+
+1. **Per polynomial size.** The call covers the 2048 used by
+   `ConfigBuilder::default()`. Changing parameters means pinning again.
+2. **Same architecture only.** Zama document that outputs differ between x86 and
+   ARM, so byte equality is an ISA-homogeneity assumption, not a theorem. A
+   mixed-ISA worker fleet will disagree no matter what is pinned — treat
+   homogeneity as a registration requirement (task 2.10d).
+3. **Call it early.** `setup_custom_fft_plan` panics if the plan for that size is
+   already initialised, and decompressing a server key initialises it.
+
+Compression is deterministic (`compression_is_deterministic`). The attested hash
+covers the compressed blob so the bridge contract can verify what it emits
+(bridge.md §5a).
+
+Prior art worth knowing: Zama's own fhEVM does exactly this — `sns-worker`
+hashes the serialized ciphertext and `CiphertextCommits.sol` majority-votes the
+digest, with drift detection and N≥3. Our L0 is their scheme.
 
 ## 4. System overview
 
@@ -182,17 +299,28 @@ Hash disagreement → job marked disputed, escrow refunded (slashing is roadmap)
 | L1 | Optimistic challenge window: anyone re-executes and disputes a result hash | Stretch |
 | L2 | ZK proof of correct homomorphic evaluation; threshold-FHE decryption; stake/slashing | Roadmap (whitepaper alignment) |
 
-## 8. Workspace layout (post-hackathon)
+## 8. Workspace layout
 
 ```
 disca/
-  primitives/     # IR, CircuitOp set, (stretch) partitioning — pure, no I/O
-  node/           # binary: --role coordinator|worker; transport + chain watcher
-  bridge/         # Foundry project: DiscaBridge.sol, demo consumer, scripts
-  disca-cli/      # parse wasm→bytecode; keygen; register helpers
-  simple-arithmetic/  # sample program (add real demo programs alongside)
-  docs/           # this file, bridge.md
+  primitives/           # IR, CircuitOp set, evaluator, bytecode, wire format
+    src/program.rs      #   WASM -> IR -> CircuitOp, stack-machine evaluation
+    src/validate.rs     #   static circuit checks + partitioning split points
+    src/bytecode.rs     #   canonical encoding + keccak256 program hash
+    src/wire.rs         #   ciphertext boundary, commitments, SealedResult
+    examples/           #   size_probe, inspect, cross_process, key_probe
+  node/                 # coordinator | worker | demo roles
+    src/coordinator.rs  #   job prep, fan-out, M-of-N aggregation, key holder
+    src/worker.rs       #   validate, evaluate, seal, report
+    src/protocol.rs     #   messages; src/transport.rs — sync HTTP
+  disca-cli/            # parse wasm->bytecode; keygen (still stubs)
+  committee-tally/      # demo circuit; simple-arithmetic/ — sample program
+  scripts/run-local.sh  # 1 coordinator + 3 workers, one deliberately faulty
+  docs/                 # this file, bridge.md, attestation.md, tasks.md,
+                        # tfhe-determinism-request.md
 ```
+
+Not yet built: `bridge/` (Foundry project — Track 3) and the chain watcher.
 
 ## 9. Scope fence for the 12 days
 

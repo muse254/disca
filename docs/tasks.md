@@ -109,95 +109,154 @@ involved.
 
 ### 2.0 Decisions to settle before writing code
 
-- [ ] **2.0a HTTP library.** Evaluation is CPU-bound and blocking — a tally is
+- [x] **2.0a HTTP library.** Evaluation is CPU-bound and blocking — a tally is
       ~1 s, a multiply ~2 s — so async buys very little at three workers.
       Recommend a threaded sync server (`tiny_http`) over `axum` + `tokio`:
       far fewer dependencies, and blocking FHE work inside a handler is honest
       rather than something to design around. Revisit only if the coordinator
       needs many concurrent connections.
-- [ ] **2.0b Payload encoding.** We already carry two encoders — `wincode` for
+- [x] **2.0b Payload encoding.** We already carry two encoders — `wincode` for
       bytecode, tfhe's `safe_serialize` for ciphertexts. Reuse both rather than
       adding a third: JSON for control fields, length-prefixed raw bytes for
       ciphertext and bytecode blobs.
-- [ ] **2.0c Worker identity.** architecture.md §11 Q3 leans an on-chain
+- [x] **2.0c Worker identity.** architecture.md §11 Q3 leans an on-chain
       registered address list over signature aggregation. Confirm it — it
       decides whether a worker needs a keypair at all in Phase 1, and therefore
       whether `POST /results` needs to be authenticated.
-- [ ] **2.0d Job identifier.** Chain-assigned `jobId` does not exist until
+- [x] **2.0d Job identifier.** Chain-assigned `jobId` does not exist until
       Track 3. Use a coordinator-local monotonic id now and make it the
       correlation key everywhere (see 2.7), so swapping in the on-chain id later
       touches one place.
 
 ### 2.1 Protocol types (`node/src/protocol.rs`)
 
-- [ ] Define the messages in one module, independent of the transport that
+- [x] Define the messages in one module, independent of the transport that
       carries them: `JobDispatch` (job id, bytecode, input blobs), `JobReport`
       (job id, worker id, result blob + attestation hash, or a failure), and the
       key-fetch response.
-- [ ] Reuse `primitives::wire::SealedResult` for what a worker reports, so blob
+- [x] Reuse `primitives::wire::SealedResult` for what a worker reports, so blob
       and hash cannot be handled apart even across the wire.
-- [ ] Round-trip tests per message.
+- [x] Round-trip tests per message.
 
 ### 2.2 Role dispatch (`node/src/main.rs`)
 
-- [ ] `--role coordinator|worker` behind clap, replacing the hardcoded demo.
-- [ ] Coordinator flags: bind address, worker addresses, `--attesters M`.
-- [ ] Worker flags: bind address, coordinator address, worker id.
-- [ ] Keep the current single-process demo reachable as `--role demo`, since it
+- [x] `--role coordinator|worker` behind clap, replacing the hardcoded demo.
+- [x] Coordinator flags: bind address, worker addresses, `--attesters M`.
+- [x] Worker flags: bind address, coordinator address, worker id.
+- [x] Keep the current single-process demo reachable as `--role demo`, since it
       is the fastest way to check the core still works without standing up a
       network.
 
 ### 2.3 Worker
 
-- [ ] Serve `POST /jobs`: decode bytecode, **validate before evaluating**
+- [x] Serve `POST /jobs`: decode bytecode, **validate before evaluating**
       (`bytecode::deserialize` already does this — surface the rejection as a
       failure report rather than a dropped connection).
-- [ ] Decompress inputs, evaluate, `seal_result`, report to the coordinator.
-- [ ] Verify each input blob against its commitment on receipt; a worker should
+- [x] Decompress inputs, evaluate, `seal_result`, report to the coordinator.
+- [x] Verify each input blob against its commitment on receipt; a worker should
       not evaluate over bytes the coordinator altered in transit.
-- [ ] Report failures explicitly. A worker that cannot evaluate must say so —
+- [x] Report failures explicitly. A worker that cannot evaluate must say so —
       silence is indistinguishable from being slow, and stalls the job.
 
 ### 2.4 Coordinator
 
-- [ ] Serve `POST /results` (worker reports) and `GET /result/<jobId>` (key
-      holder fetches the winning blob).
-- [ ] Dispatch a job to N workers concurrently.
-- [ ] Collect reports until M agree on an attestation hash, or the deadline
+- [x] Serve `POST /results` (worker reports).
+- [ ] `GET /result/<jobId>` for the key holder. Deferred: the coordinator still
+      stands in for the key holder (`KeyHolder` in `coordinator.rs`), so there
+      is nobody to serve yet. Needed when they split in Track 3.
+- [x] Dispatch a job to N workers concurrently.
+- [x] Collect reports until M agree on an attestation hash, or the deadline
       passes.
 
 ### 2.5 Server key distribution
 
-- [ ] Coordinator serves `GET /keys/<serverKeyHash>`; workers pull once and
+- [x] Coordinator serves `GET /keys/<serverKeyHash>`; workers pull once and
       cache by hash.
-- [ ] Serve the **compressed** key: 28.8 MB, not 114.8 MB (measured — this
+- [x] Serve the **compressed** key: 28.8 MB, not 114.8 MB (measured — this
       answers architecture.md §11 Q2 and makes the pull comfortable locally).
-- [ ] Workers verify the hash of what they received before installing it.
+- [x] Workers verify the hash of what they received before installing it.
 
 ### 2.6 M-of-N aggregation
 
-- [ ] Group reports by attestation hash; succeed at the first hash reaching M.
-- [ ] **Disagreement is a finding, not noise.** Determinism is verified
+- [x] Group reports by attestation hash; succeed at the first hash reaching M.
+- [x] **Disagreement is a finding, not noise.** Determinism is verified
       (1.2), so honest workers cannot disagree — a mismatch means a faulty or
       dishonest worker. Log which worker reported what, and mark the job
       disputed rather than quietly retrying.
-- [ ] Timeout → job fails, refundable (mirrors `refundOnTimeout` in bridge.md §6).
+- [x] Timeout → job fails, refundable (mirrors `refundOnTimeout` in bridge.md §6).
 
 ### 2.7 Job-scoped telemetry (absorbs 1b.2)
 
-- [ ] Put `job_id` on every span on both sides, so one job's path through the
+- [x] Put `job_id` on every span on both sides, so one job's path through the
       coordinator and three workers is a single filterable trace.
-- [ ] Coordinator logs the agreed hash, the attester set, and per-worker
+- [x] Coordinator logs the agreed hash, the attester set, and per-worker
       latency — the same fields `fulfillJob` will eventually take on-chain.
 
 ### 2.8 Local end-to-end run
 
-- [ ] Script one coordinator + three workers as local processes, 2-of-3
+- [x] Script one coordinator + three workers as local processes, 2-of-3
       attestation, no chain.
-- [ ] Include a deliberately faulty worker in the script — a wrong result is the
+- [x] Include a deliberately faulty worker in the script — a wrong result is the
       only way to demonstrate that M-of-N does anything, and it is the most
       convincing thing in the eventual demo video.
-- [ ] Assert the key holder decrypts the expected plaintext at the end.
+- [x] Assert the key holder decrypts the expected plaintext at the end.
+
+### 2.9 Review follow-ups (PR #9)
+
+- [x] **2.9a Bind attestations to dispatches.** Agreement was counted over
+      self-declared worker names with no registry check and no de-duplication,
+      so one worker could settle a job alone. Per-(job, worker) tokens now
+      attribute each report to the worker it was dispatched to.
+- [x] **2.9b Bound the worker job queue** and refuse with 503 when full.
+- [x] **2.9c Refuse when two groups both reach quorum** rather than letting
+      `HashMap` order pick a winner. Reachable whenever `M <= N/2`.
+- [x] **2.9d Check HTTP status and fail loudly on truncation.** A 404 body was
+      being handed back to the caller as the server key.
+- [x] **2.9e Stop overclaiming the commitment checks.** The commitment travels
+      in the same message as the bytes it commits to, so it detects corruption,
+      not a malicious coordinator. Real once the commitment comes from the
+      chain (Track 3).
+- [ ] **2.9f Re-verify input commitments against the chain**, not against the
+      dispatch, once `submitJob` exists. This is what makes 2.9e's check
+      adversarial rather than merely diagnostic.
+
+### 2.10 Byte-equality attestation — fixed by pinning the FFT plan
+
+Investigation and measurements: [PR #9](https://github.com/muse254/disca/pull/9).
+
+The divergence was never randomness: tfhe-rs benchmarks FFT algorithms for 10 ms
+at first use and caches the winner, so different processes pick different
+numerically-equivalent algorithms and round a few coefficients differently.
+`pin_fft_plan` in `node/src/main.rs` fixes it. Demo settle rate went from 2 of 8
+to 6 of 6. Full write-up in architecture.md §3.
+
+- [x] **2.10a Pin the FFT plan at node startup**, before anything touches a key.
+- [ ] **2.10b Enforce the reproducibility preconditions at registration.** Byte
+      equality holds only for workers sharing one CPU architecture (x86 and ARM
+      diverge), with the FFT plan pinned, evaluating on CPU (the `gpu` feature
+      selects multi-bit parameters that are non-deterministic without
+      `with_deterministic_execution()`). Registration should record and check
+      these; until it does, disagreement means divergence, not dishonesty, and
+      must not feed slashing. `bridge.md` §2 now states this.
+- [x] **2.10c Guard reproducibility across processes.**
+      `primitives/tests/determinism_under_concurrency.rs` re-executes its own
+      binary as concurrent children sharing one key and inputs, and fails if
+      they disagree. It has to be cross-process: tfhe caches the FFT plan in a
+      process-global `OnceLock`, so an in-process test passes whether or not the
+      plan is pinned and would not have caught this. Verified to fail when
+      pinning is skipped (`DISCA_SKIP_PIN=1`). It also covers the polynomial
+      size, which has no public accessor — if `ConfigBuilder::default()` ever
+      moves off 2048 the pin covers nothing and this test fails.
+- [ ] **2.10f Keep the divergence path anyway.** Agreement can still fail for
+      reasons we have not seen; a disputed job must stay a first-class outcome
+      rather than an assertion.
+- [ ] **2.10d Raise it upstream.** `setup_custom_fft_plan` is public but
+      `#![doc(hidden)]`, absent from the docs and release notes, and panics if
+      called late. Draft issue in `docs/tfhe-determinism-request.md`.
+- [ ] **2.10e Re-check the parallel carry-propagation path.** `add.rs` selects an
+      algorithm from `rayon::current_num_threads()`, which would diverge across
+      machines with different core counts. Not reproduced on our circuit shape;
+      confirm it cannot bite before relying on cross-machine agreement.
 
 ## Track 3 — Bridge (`bridge/`, new Foundry project) — needs 0.3
 

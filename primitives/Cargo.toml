@@ -17,4 +17,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 bincode = { workspace = true }
+rayon = { workspace = true }
 tracing-subscriber = { workspace = true }

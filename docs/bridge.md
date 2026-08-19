@@ -93,8 +93,17 @@ Design notes:
   an L1-ladder upgrade.
 - **The contract never verifies computation cryptography.** It verifies that M
   of N registered workers agreed on `keccak256(resultCiphertext)`. Because FHE
-  evaluation is deterministic, agreement implies correct evaluation with at most
-  N-M Byzantine workers tolerated (for the parts each worker ran).
+  evaluation is byte-reproducible *under the conditions in `architecture.md`
+  §3*, agreement implies correct evaluation with at most N-M Byzantine workers
+  tolerated (for the parts each worker ran).
+
+  Those conditions are load-bearing and belong in the worker registry, not just
+  in prose: the FFT plan must be pinned, every worker must share one CPU
+  architecture (x86 and ARM produce different bytes), and evaluation must be on
+  CPU rather than GPU. A worker that violates any of them disagrees with honest
+  workers while behaving honestly. Registration should record architecture and
+  reject a mismatch (task 2.10b); until it does, disagreement is evidence of
+  *divergence*, not of dishonesty, and must not feed slashing.
 - **Escrow pays the coordinator on fulfillment** and refunds the poster on
   timeout. No slashing in the demo; dishonest workers only waste their own time
   since they cannot forge agreement.

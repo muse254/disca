@@ -1,133 +1,188 @@
 //! DISCA node.
 //!
-//! Currently a single-process demo: it loads a compiled program, generates a
-//! keypair, evaluates every exported function homomorphically, and decrypts the
-//! results. The coordinator/worker split this eventually grows into is task 2.1.
+//! One binary, three roles. `coordinator` and `worker` are the distributed
+//! system; `demo` is the original single-process evaluator, kept because it is
+//! the fastest way to check the execution core still works without standing up
+//! a network.
 //!
-//! All output is [`tracing`] rather than `println!`, because these are the same
-//! measurements a worker will have to report to a coordinator once the node is
-//! distributed: what it ran, over how many ops, and how long each phase took.
-//! Set `RUST_LOG` to change verbosity — `RUST_LOG=debug` adds per-circuit
-//! evaluation timings, `RUST_LOG=trace` adds per-opcode timings.
+//! All output is [`tracing`] rather than `println!`: these are the measurements
+//! a worker reports to a coordinator, so they are shaped like job telemetry
+//! from the start. `RUST_LOG` sets verbosity — `debug` adds per-circuit
+//! evaluation spans, `trace` adds per-opcode timings.
 
-use std::time::Instant;
+mod coordinator;
+mod demo;
+mod protocol;
+mod transport;
+mod worker;
 
-use primitives::program::{DiscaProgram, Program};
-use primitives::{bytecode, wire};
-use tfhe::prelude::FheDecrypt;
-use tfhe::{ConfigBuilder, FheInt32, generate_keys, set_server_key};
-use tracing::{Level, info, info_span, warn};
+use std::time::Duration;
+
+use clap::{Parser, Subcommand};
+use tfhe::core_crypto::fft_impl::fft64::math::fft::{
+    FftAlgo, Method, Plan, PolynomialSize, setup_custom_fft_plan,
+};
+use tracing::{Level, error};
 use tracing_subscriber::EnvFilter;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "DISCA node")]
+struct Cli {
+    #[command(subcommand)]
+    role: Role,
+}
+
+#[derive(Subcommand, Debug)]
+enum Role {
+    /// Prepare a job, fan it out to workers, and settle on an M-of-N result.
+    ///
+    /// Also stands in for the key holder until job submission moves on-chain.
+    Coordinator {
+        /// Address to serve the server key and worker reports on.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+
+        /// Worker address. Repeat for each worker.
+        #[arg(long = "worker", required = true)]
+        workers: Vec<String>,
+
+        /// How many workers must report the same result (the M in M-of-N).
+        #[arg(long, default_value_t = 2)]
+        attesters: usize,
+
+        /// WASM module to run. Must be built with optimizations — see
+        /// architecture.md §2a.
+        #[arg(long)]
+        program: String,
+
+        /// Exported function within that module.
+        #[arg(long)]
+        function: String,
+
+        /// Comma-separated plaintext inputs. The key holder encrypts these; no
+        /// worker ever sees them.
+        #[arg(long, value_delimiter = ',', required = true)]
+        inputs: Vec<i32>,
+
+        /// How long to wait for agreement before giving up.
+        #[arg(long, default_value_t = 120)]
+        deadline_secs: u64,
+    },
+
+    /// Evaluate circuits dispatched by a coordinator.
+    Worker {
+        #[arg(long, default_value = "127.0.0.1:8081")]
+        bind: String,
+
+        /// Coordinator address, for pulling the server key and reporting back.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        coordinator: String,
+
+        /// Identifies this attester. Stands in for the address it is registered
+        /// under on-chain.
+        #[arg(long)]
+        id: String,
+
+        /// Deliberately return a wrong result. Exists so the local run can show
+        /// M-of-N rejecting something — a job where every worker agrees
+        /// demonstrates nothing about the mechanism.
+        #[arg(long)]
+        faulty: bool,
+    },
+
+    /// Run the execution core in a single process, no network.
+    Demo,
+}
 
 fn main() {
     init_telemetry();
+    pin_fft_plan();
 
-    let wasm_path = format!(
-        "{}/../simple-arithmetic/simple_arithmetic.wasm",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let result = match Cli::parse().role {
+        Role::Coordinator {
+            bind,
+            workers,
+            attesters,
+            program,
+            function,
+            inputs,
+            deadline_secs,
+        } => coordinator::run(coordinator::Config {
+            bind,
+            workers,
+            attesters,
+            program,
+            function,
+            inputs,
+            deadline: Duration::from_secs(deadline_secs),
+        }),
 
-    let program = {
-        let _span = info_span!("program.load", path = %wasm_path).entered();
-        let started = Instant::now();
+        Role::Worker {
+            bind,
+            coordinator,
+            id,
+            faulty,
+        } => worker::run(worker::Config {
+            bind,
+            coordinator,
+            id,
+            behaviour: if faulty {
+                worker::Behaviour::Faulty
+            } else {
+                worker::Behaviour::Honest
+            },
+        }),
 
-        let wasm = std::fs::read(&wasm_path).expect("failed to read wasm");
-        let parsed = Program::from_wasm(&wasm).expect("failed to parse wasm");
-        let program = DiscaProgram::from_program(&parsed);
-
-        // The bytecode hash is what a bridge contract pins on-chain, so it is
-        // the identity a worker should log alongside anything it executes.
-        let hash = bytecode::bytecode_hash(&program).expect("encode bytecode");
-
-        info!(
-            bytes = wasm.len(),
-            functions = program.functions().len(),
-            bytecode_hash = %bytecode::hex(&hash),
-            elapsed_ms = started.elapsed().as_millis(),
-            "program loaded"
-        );
-        program
+        Role::Demo => demo::run(),
     };
 
-    let (client_key, server_key) = {
-        let _span = info_span!("keys.generate").entered();
-        let started = Instant::now();
-        let keys = generate_keys(ConfigBuilder::default().build());
-        info!(
-            elapsed_ms = started.elapsed().as_millis(),
-            "keypair generated"
-        );
-        keys
-    };
-    set_server_key(server_key);
-
-    // Inputs cross the boundary compressed and committed, exactly as they will
-    // when they arrive as calldata rather than as local values.
-    let inputs: Vec<FheInt32> = {
-        let _span = info_span!("inputs.encrypt", count = 2).entered();
-        let started = Instant::now();
-
-        let expanded = [4i32, 7i32]
-            .iter()
-            .map(|value| {
-                let compressed = wire::encrypt_input(*value, &client_key).expect("encrypt input");
-                let encoded = wire::encode(&compressed).expect("encode input");
-                let commit = wire::commitment(&encoded);
-
-                info!(
-                    bytes = encoded.len(),
-                    commitment = %bytecode::hex(&commit),
-                    "input committed"
-                );
-
-                let received = wire::decode(&encoded).expect("decode input");
-                wire::decompress(&received)
-            })
-            .collect();
-
-        info!(
-            elapsed_ms = started.elapsed().as_millis(),
-            "inputs encrypted"
-        );
-        expanded
-    };
-
-    for func in program {
-        let Some(name) = func.name.as_deref() else {
-            // Unexported functions have no stable name to address them by, so
-            // there is nothing a caller could ask us to run.
-            continue;
-        };
-
-        let span = info_span!("function.evaluate", function = name);
-        let _enter = span.enter();
-        let started = Instant::now();
-
-        match func.run(&inputs) {
-            Ok(output) => {
-                // What a worker reports for M-of-N attestation: the compressed
-                // blob that goes on-chain, and the hash the contract can
-                // recompute from it.
-                let sealed = wire::seal_result(&output).expect("seal result");
-                let value: i32 =
-                    wire::decompress(&wire::decode(&sealed.blob).expect("decode result"))
-                        .decrypt(&client_key);
-
-                info!(
-                    result = value,
-                    result_bytes = sealed.blob.len(),
-                    result_hash = %bytecode::hex(&sealed.hash),
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "function evaluated"
-                );
-            }
-            Err(error) => {
-                // A worker that cannot evaluate a circuit has to report the
-                // failure, not abort the whole job.
-                warn!(%error, "function failed to evaluate");
-            }
-        }
+    if let Err(error) = result {
+        error!(%error, "node exited with an error");
+        std::process::exit(1);
     }
+}
+
+/// Pins the FFT plan so evaluation is byte-reproducible across nodes.
+///
+/// **This is what makes M-of-N attestation work.** By default `Fft::new` picks
+/// between numerically-equivalent FFT algorithms by benchmarking them for 10 ms
+/// at first use, so the winner depends on machine load at that instant. The
+/// algorithms associate the floating-point butterflies differently, a few torus
+/// coefficients round the other way, and two honest workers produce ciphertexts
+/// that decrypt identically but differ byte for byte. Agreement then fails at
+/// random. Measured on the demo circuit: 1 of 6 rounds unanimous unpinned,
+/// 6 of 6 pinned, with no measurable slowdown.
+///
+/// Called before anything else touches a plan — `setup_custom_fft_plan` panics
+/// if the plan for that polynomial size is already initialised, and merely
+/// decompressing a server key initialises it.
+///
+/// Three ways this stops working, all silent:
+///
+/// * **Different polynomial size.** The plan is per size; 2048 is what
+///   `ConfigBuilder::default()` selects for the parameters this build pins.
+///   Changing parameters, or a tfhe-rs version that changes the default, leaves
+///   evaluation unpinned with no error — which is why `tfhe` is pinned to an
+///   exact version in the workspace manifest.
+/// * **Mixed CPU architectures.** Zama document that outputs differ between x86
+///   and ARM, so byte equality holds within an architecture and not across one.
+///   A mixed fleet disagrees no matter what is pinned.
+/// * **GPU evaluation.** The `gpu` feature switches the default to multi-bit
+///   parameters, which are documented as non-deterministic unless
+///   `with_deterministic_execution()` is set. This build is CPU-only.
+///
+/// A worker violating any of these disagrees with honest workers while behaving
+/// honestly, so disagreement is evidence of divergence rather than dishonesty
+/// until worker registration enforces them (task 2.10b).
+fn pin_fft_plan() {
+    let fourier = PolynomialSize(2048).to_fourier_polynomial_size();
+    setup_custom_fft_plan(Plan::new(
+        fourier.0,
+        Method::UserProvided {
+            base_algo: FftAlgo::Dif4,
+            base_n: fourier.0,
+        },
+    ));
 }
 
 /// Installs the tracing subscriber. `RUST_LOG` wins when set; otherwise we
