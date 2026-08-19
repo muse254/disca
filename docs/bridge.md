@@ -44,7 +44,7 @@ is the number to watch if job results ever grow beyond a single `i32`.
 ## 2. Contract interface (DiscaBridge.sol)
 
 ```solidity
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
 /// Minimal sketch - final signatures may shift during implementation.
