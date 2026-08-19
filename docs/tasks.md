@@ -220,6 +220,20 @@ involved.
       dispatch, once `submitJob` exists. This is what makes 2.9e's check
       adversarial rather than merely diagnostic.
 
+### 2.11 Housekeeping
+
+- [x] **2.11a Keep `logic_gates` out of the binary.** The gate-composition route
+      to FHE arithmetic has no callers — the evaluator uses tfhe's integer API.
+      Now behind the `boolean-circuits` feature, off by default, documented as
+      the deliberate alternative rather than deleted (the whitepaper describes
+      that approach and this is its only implementation). Its truth-table tests
+      were ~7.3 s of the primitives suite, about a third, guarding unused code.
+- [ ] **2.11b Build with `--all-features` in CI.** `boolean-circuits` is not
+      compiled by an ordinary build, so nothing type-checks it and it will rot.
+- [ ] **2.11c Implement `disca-cli parse` (see 4.3).** It now exits 2 with a
+      pointer to the `inspect` example instead of accepting a file, doing
+      nothing, and reporting success.
+
 ### 2.10 Byte-equality attestation — fixed by pinning the FFT plan
 
 Investigation and measurements: [PR #9](https://github.com/muse254/disca/pull/9).
