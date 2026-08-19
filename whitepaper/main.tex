@@ -108,7 +108,7 @@ This work represents a first of many steps, rather than a definitive solution.
 \subsection{Preliminaries}
 
 Methods through software are achieved through cryptography.
-More specifically we have Homomorphic Encryption (HE) and Fully Homomorphic Encryption (FHE).
+More specifically we have Homomorphic Encryption (HE) and Fully Homomorphic Encryption (FHE), the latter first shown to be constructible by Gentry~\cite{homomorphic_encryption}.
 There are also cryptographic hybrid solutions that combine multiple techniques, such as Homomorphic Encryption (HE) and Zero-Knowledge Proofs (ZKPs).
 
 However, it is important to note that the technology will be truly achieved when both cost and performance graphs trend downward, enabling practical deployment at scale.
@@ -134,7 +134,7 @@ This approach enables the construction of circuits from standard programming lan
 
 \subsubsection{Compilation to WebAssembly}
 
-Programs written in high-level languages (Rust, C/C++, Go, etc.) are first compiled to WebAssembly format.
+Programs written in high-level languages (Rust, C/C++, Go, etc.) are first compiled to WebAssembly format~\cite{wasm_spec}.
 This compilation step is crucial for several reasons:
 
 \begin{itemize}
@@ -261,7 +261,7 @@ This is the classical boolean-circuit view of FHE, and it is the route we implem
 
 \textbf{Native integer operations.} The evaluation library exposes arithmetic and comparison directly on encrypted integers held in a radix representation, and performs the gate-level work internally.
 
-Measured in release against tfhe-rs 1.5 with default parameters:
+Measured in release against an implementation of the TFHE scheme~\cite{tfhe_scheme,tfhe_rs} with default parameters:
 
 \begin{center}
 \begin{tabular}{lr}
@@ -363,7 +363,7 @@ Idea & All $N$ perform the whole job & Work divided among parties \\
 Question answered & Did the node compute correctly? & Can one party act alone? \\
 Cost & $N \times$ computation & Coordination \\
 Instances & Modular redundancy, & Secret sharing, \\
- & Byzantine fault tolerance & threshold signatures \\
+ & Byzantine fault tolerance~\cite{byzantine_generals} & threshold signatures~\cite{shamir_secret_sharing} \\
 \hline
 \end{tabular}
 \end{center}
@@ -384,7 +384,7 @@ Those algorithms compute the same transform but group their constituent operatio
 A coefficient near a rounding boundary consequently lands one unit either side depending on the ordering.
 
 The step that surprises is why a different algorithm changes the result at all, given that all of them compute the same transform.
-The answer is that floating-point addition is not associative.
+The answer is that floating-point addition is not associative~\cite{floating_point}.
 Every operation rounds to the nearest representable value, so regrouping the same additions can change the answer:
 
 \begin{verbatim}
@@ -400,7 +400,7 @@ sequential:  89616922.12479763
 pairwise  :  89616922.12479764
 \end{verbatim}
 
-The atomic step of a Fast Fourier Transform is the \emph{butterfly}: given two values and a twiddle factor $w$, it produces $a + wb$ and $a - wb$.
+The atomic step of a Fast Fourier Transform~\cite{cooley_tukey} is the \emph{butterfly}: given two values and a twiddle factor $w$, it produces $a + wb$ and $a - wb$.
 A transform over two thousand and forty-eight points is thousands of these arranged in stages, and the competing algorithms differ precisely in how those stages group---which partial sums form first, and how they nest.
 Regrouping is exactly what the examples above show to be unsafe in floating point.
 
@@ -427,6 +427,10 @@ Failed, no threshold reached & 3 & 0 \\
 
 A quarter of jobs failed outright and half incorrectly accused an honest node, which would make any penalty built on that signal punish honest participants.
 Fixing the selection removes the divergence at no measurable cost in evaluation time.
+
+The requirement has a security counterpart in the literature.
+Smart and Walter~\cite{deterministic_tfhe} show that the standard security notion for FHE under a decryption oracle ordinarily calls for a \emph{randomised} evaluation procedure, and that this randomisation can be removed for TFHE in the random oracle model.
+Deterministic evaluation is therefore something a deployment may legitimately want and something the theory can accommodate; the divergence described above is a separate, purely implementational matter, since no randomness is involved in it at all.
 
 Byte equality is therefore conditional, and the conditions belong in node registration rather than in documentation.
 Nodes must share a processor architecture, since implementations differ between instruction sets; must fix the transform selection identically; and must evaluate on the same class of hardware, since accelerated backends select parameters that are not reproducible at all.
