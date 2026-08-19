@@ -41,13 +41,9 @@ pub struct Config {
 
 /// Runs the worker until the process is killed.
 ///
-/// **Known unsound:** M-of-N attestation compares hashes of result ciphertext
-/// bytes, and tfhe-rs evaluation is not byte-reproducible. Two honest workers
-/// given identical keys and identical inputs intermittently produce results
-/// that decrypt to the same value but differ byte for byte, so jobs fail to
-/// reach agreement at random. Restricting evaluation to a single thread was
-/// tried and does not fix it. The attestation scheme needs a foundation other
-/// than byte equality before this is dependable — see `architecture.md` §3.
+/// Reproducible results depend on the FFT plan having been pinned before this
+/// process touched a server key — see `pin_fft_plan` in `main.rs`. Without it,
+/// two honest workers disagree at random and no job settles.
 pub fn run(config: Config) -> Result<(), String> {
     let server = tiny_http::Server::http(&config.bind)
         .map_err(|e| format!("cannot bind {}: {e}", config.bind))?;

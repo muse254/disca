@@ -15,7 +15,30 @@ use std::path::Path;
 
 use primitives::program::{DiscaProgram, Program};
 use primitives::{bytecode, wire};
+use tfhe::core_crypto::fft_impl::fft64::math::fft::{
+    FftAlgo, Method, Plan, PolynomialSize, setup_custom_fft_plan,
+};
 use tfhe::{CompressedServerKey, ConfigBuilder, FheInt32, generate_keys, set_server_key};
+
+/// Pins the FFT plan instead of letting tfhe benchmark one at first use.
+///
+/// By default `Fft::new` picks between numerically-equivalent FFT algorithms by
+/// timing them for 10 ms, so the winner depends on machine load at that moment.
+/// Different algorithms associate the floating-point butterflies differently,
+/// which changes the result ciphertext's bytes without changing the plaintext.
+/// Must run before anything touches a plan -- the setter panics if the plan for
+/// that polynomial size is already initialised.
+fn pin_fft_plan() {
+    let n = PolynomialSize(2048);
+    let fourier = n.to_fourier_polynomial_size();
+    setup_custom_fft_plan(Plan::new(
+        fourier.0,
+        Method::UserProvided {
+            base_algo: FftAlgo::Dif4,
+            base_n: fourier.0,
+        },
+    ));
+}
 
 const TALLY: &str = r#"
 (module
@@ -64,6 +87,10 @@ fn setup(dir: &Path) {
 }
 
 fn eval(dir: &Path) {
+    if std::env::var_os("PIN_FFT").is_some() {
+        pin_fft_plan();
+    }
+
     let server_key = std::fs::read(dir.join("server_key.bin")).expect("run setup first");
     set_server_key(wire::decode_server_key(&server_key).unwrap());
 

@@ -97,58 +97,57 @@ allocation, built in release.
 | Worker nodes | Ciphertexts, circuit segment | Plaintext | ≤ threshold may lie about results; M-of-N attestation catches it |
 | Chain / observers | Commitments, bytecode hash, result commitment | Plaintext | — |
 
-**Deterministic evaluation property — DOES NOT HOLD. This invalidates L0 as
-currently designed.**
+**Deterministic evaluation property — holds, but only once the FFT plan is
+pinned.**
 
-The M-of-N scheme in §7 assumes two honest workers executing the same circuit
-over the same input ciphertexts produce *byte-identical* results, so that
-agreement on `keccak256(result)` is evidence of correct evaluation. Measured
-against tfhe-rs 1.5, that is false.
+M-of-N in §7 assumes two honest workers executing the same circuit over the same
+input ciphertexts produce *byte-identical* results, so agreement on
+`keccak256(result)` is evidence of correct evaluation. Out of the box that is
+false, and the reason is not what it looks like.
 
-Three processes given byte-identical server keys and byte-identical inputs,
-evaluating the same circuit, intermittently produce results that decrypt to the
-same value but differ byte for byte. Reproduce with
-`primitives/examples/cross_process.rs`:
+**It is not randomness.** `Fft::new` builds every plan with
+`Method::Measure(Duration::from_millis(10))`: tfhe-rs times several
+numerically-equivalent FFT algorithms at first use and keeps whichever won *on
+that process, under that machine load*. The algorithms associate the
+floating-point butterflies differently, a few torus coefficients round the other
+way, and the ciphertext differs while the plaintext does not. The chosen plan is
+cached in a `OnceLock`, so a process is self-consistent forever — which is
+exactly why an in-process determinism test passes while separate workers
+disagree, and why a whole round of concurrent workers can drift together (they
+benchmark under the same contention).
 
-| Circuit | Threads | 3 concurrent processes, 6 rounds |
+**The fix is one call before anything touches a key**, `pin_fft_plan` in
+`node/src/main.rs`, using the public `setup_custom_fft_plan` demonstrated in
+tfhe-rs's own `examples/manual_fft.rs`. Measured on the demo circuit, three
+concurrent processes with identical keys and inputs:
+
+| | rounds unanimous (of 6) | demo settle rate |
 |---|---|---|
-| 6-op (`max` of two) | default | diverged |
-| 6-op | `RAYON_NUM_THREADS=1` | agreed 5/5 |
-| **18-op (`tally4_select`)** | **`RAYON_NUM_THREADS=1`** | **diverged in 2 of 6 rounds** |
+| unpinned | 1 | 2 of 8 |
+| **pinned** | **6** | **6 of 6** |
 
-Restricting evaluation to one thread was tried and rejected: it appeared to work
-on a six-op circuit, does not hold on the real demo circuit, and costs ~3x
-(0.65 s → 2.14 s). Divergence gets likelier as circuits get longer, which is the
-wrong direction. The likely mechanism is randomness drawn during evaluation
-(noise management), which is a property of the scheme rather than of threading.
+No measurable slowdown. With it pinned, the `attestation disagreement` warning
+fires only on the genuinely faulty worker; unpinned it accused honest workers
+more often than the faulty one.
 
-Compression *is* deterministic (`compression_is_deterministic`); the problem is
-upstream of it.
+Three limits to keep in view:
 
-### What this means
+1. **Per polynomial size.** The call covers the 2048 used by
+   `ConfigBuilder::default()`. Changing parameters means pinning again.
+2. **Same architecture only.** Zama document that outputs differ between x86 and
+   ARM, so byte equality is an ISA-homogeneity assumption, not a theorem. A
+   mixed-ISA worker fleet will disagree no matter what is pinned — treat
+   homogeneity as a registration requirement (task 2.10d).
+3. **Call it early.** `setup_custom_fft_plan` panics if the plan for that size is
+   already initialised, and decompressing a server key initialises it.
 
-`node`'s coordinator and workers are complete and correct in every other
-respect, but jobs fail to reach agreement at random, because honest workers
-disagree. **The attestation scheme needs a foundation other than byte
-equality.** Options, in rough order of cost:
+Compression is deterministic (`compression_is_deterministic`). The attested hash
+covers the compressed blob so the bridge contract can verify what it emits
+(bridge.md §5a).
 
-1. **Key-holder adjudication.** The key holder decrypts each worker's result and
-   compares *plaintexts*; M-of-N is decided on the decrypted value. Sound, and
-   cheap to build. Cost: the contract can no longer verify agreement itself —
-   the key holder attests — which weakens bridge.md §5a's guarantee and puts the
-   key holder on the critical path of every job.
-2. **A deterministic evaluation mode.** tfhe exposes `DeterministicSeeder` in
-   `core_crypto`, but it is wired into key generation and low-level encryption,
-   not the high-level evaluation path used here. Worth investigating whether
-   server-side randomness can be seeded per job; if it can, byte equality
-   returns and nothing else in the design changes.
-3. **Climb the ladder early (§7).** L1's optimistic challenge window verifies
-   *computation* rather than byte equality — a challenger re-executes and
-   disputes the decrypted result. L2's ZK proofs likewise. Both were roadmap;
-   this finding is the argument for pulling L1 forward.
-
-Recorded as tasks 2.10a–c. Until one is chosen, treat M-of-N result-hash
-matching as **unimplemented**, not merely unpolished.
+Prior art worth knowing: Zama's own fhEVM does exactly this — `sns-worker`
+hashes the serialized ciphertext and `CiphertextCommits.sol` majority-votes the
+digest, with drift detection and N≥3. Our L0 is their scheme.
 
 ## 4. System overview
 

@@ -220,25 +220,29 @@ involved.
       dispatch, once `submitJob` exists. This is what makes 2.9e's check
       adversarial rather than merely diagnostic.
 
-### 2.10 Byte-equality attestation does not work — decide the replacement
+### 2.10 Byte-equality attestation — fixed by pinning the FFT plan
 
-tfhe-rs evaluation is not byte-reproducible. Honest workers given identical keys
-and inputs intermittently produce results that decrypt the same but differ byte
-for byte, so M-of-N on `keccak256(result)` fails at random. Single-threading was
-tried and rejected (worked on a 6-op circuit, not on the real 18-op one, ~3x
-cost). Evidence and options in architecture.md §3. **Pick one before Track 3
-commits the contract to a scheme.**
+The divergence was never randomness: tfhe-rs benchmarks FFT algorithms for 10 ms
+at first use and caches the winner, so different processes pick different
+numerically-equivalent algorithms and round a few coefficients differently.
+`pin_fft_plan` in `node/src/main.rs` fixes it. Demo settle rate went from 2 of 8
+to 6 of 6. Full write-up in architecture.md §3.
 
-- [ ] **2.10a Key-holder adjudication.** Key holder decrypts each result and
-      compares plaintexts. Sound and cheap; costs the contract-verifiable
-      property in bridge.md §5a and puts the key holder on every job's path.
-- [ ] **2.10b Deterministic evaluation.** Investigate whether tfhe's
-      `DeterministicSeeder` can seed the high-level evaluation path per job. If
-      so, byte equality returns and nothing else changes. Highest value if it
-      works; unknown whether it can.
-- [ ] **2.10c Pull L1 forward.** An optimistic challenge window verifies
-      computation rather than bytes. Was roadmap; this finding is the argument
-      for doing it now.
+- [x] **2.10a Pin the FFT plan at node startup**, before anything touches a key.
+- [ ] **2.10b Require a homogeneous fleet.** Zama document that outputs differ
+      between x86 and ARM, so byte equality holds within an architecture, not
+      across. Worker registration should record and check architecture, and
+      `bridge.md` should say so.
+- [ ] **2.10c Keep the divergence path anyway.** Agreement can still fail for
+      reasons we have not seen; a disputed job must stay a first-class outcome
+      rather than an assertion.
+- [ ] **2.10d Raise it upstream.** `setup_custom_fft_plan` is public but
+      `#![doc(hidden)]`, absent from the docs and release notes, and panics if
+      called late. Draft issue in `docs/tfhe-determinism-request.md`.
+- [ ] **2.10e Re-check the parallel carry-propagation path.** `add.rs` selects an
+      algorithm from `rayon::current_num_threads()`, which would diverge across
+      machines with different core counts. Not reproduced on our circuit shape;
+      confirm it cannot bite before relying on cross-machine agreement.
 
 ## Track 3 — Bridge (`bridge/`, new Foundry project) — needs 0.3
 

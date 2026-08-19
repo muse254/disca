@@ -196,25 +196,29 @@ Replication is justified. It is the only verification available at L0, and the
 comparison step is genuinely free — 0.002% of a job. The mechanism is not fluff;
 an unverified FHE coprocessor returns numbers nobody should believe (§1).
 
-**The choice of comparison key is wrong.** Byte equality of compressed
-ciphertexts is not a property tfhe-rs provides, and the measurements say so
-plainly: 25% of all-honest jobs fail, 50% slander an honest worker, and the
-shipped demo settles twice in eight attempts. Treat M-of-N result-hash matching
-as **unimplemented**, per `architecture.md` §3.
+**The comparison key is sound once the FFT plan is pinned.** The numbers below
+were measured *unpinned* and are the reason this document exists: 25% of
+all-honest jobs failed, 50% slandered an honest worker, and the demo settled
+twice in eight attempts. The cause turned out to be tfhe-rs benchmarking FFT
+algorithms at first use rather than any randomness in evaluation. With
+`pin_fft_plan` (architecture.md §3) the demo settles 6 of 6 and disagreement
+fires only on the genuinely faulty worker. Byte equality *is* available; it just
+is not the default.
 
 Two consequences that are easy to miss:
 
-1. **The disagreement warning is not evidence.** `attestation disagreement`
-   currently fires on honest workers more often than on the faulty one. Any
-   future slashing or reputation logic built on it would punish honest
-   participants.
+1. **The disagreement warning was not evidence, and now is.** Unpinned it fired
+   on honest workers more often than on the faulty one, which would have made
+   any slashing or reputation logic punish honest participants. Pinned, it
+   fires only on the faulty worker — but see architecture.md §3 on mixed-ISA
+   fleets before treating it as proof of dishonesty.
 2. **`bridge.md` §2 is now stale.** It states "Because FHE evaluation is
    deterministic, agreement implies correct evaluation." That premise is false
    as measured, and the sentence should be corrected along with whichever
    replacement scheme is chosen.
 
-Adjudicating on the decrypted plaintext is the cheapest scheme that works with
-what is built (options and costs in `architecture.md` §3, recorded as tasks
+Adjudicating on the decrypted plaintext remains the fallback if byte equality
+ever proves unreliable again (mixed architectures being the known risk) (options and costs in `architecture.md` §3, recorded as tasks
 2.10a–c). It costs ~7% of a job and puts the key holder on the critical path,
 weakening `bridge.md` §5a's on-chain verifiability — that is a real trade, not a
 free fix, and it is the decision this document exists to inform.

@@ -19,6 +19,9 @@ mod worker;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use tfhe::core_crypto::fft_impl::fft64::math::fft::{
+    FftAlgo, Method, Plan, PolynomialSize, setup_custom_fft_plan,
+};
 use tracing::{Level, error};
 use tracing_subscriber::EnvFilter;
 
@@ -93,6 +96,7 @@ enum Role {
 
 fn main() {
     init_telemetry();
+    pin_fft_plan();
 
     let result = match Cli::parse().role {
         Role::Coordinator {
@@ -136,6 +140,37 @@ fn main() {
         error!(%error, "node exited with an error");
         std::process::exit(1);
     }
+}
+
+/// Pins the FFT plan so evaluation is byte-reproducible across nodes.
+///
+/// **This is what makes M-of-N attestation work.** By default `Fft::new` picks
+/// between numerically-equivalent FFT algorithms by benchmarking them for 10 ms
+/// at first use, so the winner depends on machine load at that instant. The
+/// algorithms associate the floating-point butterflies differently, a few torus
+/// coefficients round the other way, and two honest workers produce ciphertexts
+/// that decrypt identically but differ byte for byte. Agreement then fails at
+/// random. Measured on the demo circuit: 1 of 6 rounds unanimous unpinned,
+/// 6 of 6 pinned, with no measurable slowdown.
+///
+/// Called before anything else touches a plan — `setup_custom_fft_plan` panics
+/// if the plan for that polynomial size is already initialised, and merely
+/// decompressing a server key initialises it.
+///
+/// Two limits worth knowing. The plan is per polynomial size, so this covers
+/// the 2048 used by `ConfigBuilder::default()` and nothing else. And it makes
+/// results reproducible across *machines of the same architecture* — Zama
+/// document that outputs differ between x86 and ARM, so a mixed-ISA fleet will
+/// still disagree.
+fn pin_fft_plan() {
+    let fourier = PolynomialSize(2048).to_fourier_polynomial_size();
+    setup_custom_fft_plan(Plan::new(
+        fourier.0,
+        Method::UserProvided {
+            base_algo: FftAlgo::Dif4,
+            base_n: fourier.0,
+        },
+    ));
 }
 
 /// Installs the tracing subscriber. `RUST_LOG` wins when set; otherwise we
