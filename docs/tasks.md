@@ -244,6 +244,18 @@ numerically-equivalent algorithms and round a few coefficients differently.
 to 6 of 6. Full write-up in architecture.md §3.
 
 - [x] **2.10a Pin the FFT plan at node startup**, before anything touches a key.
+- [ ] **2.10i Sign attestations per worker. Blocks all of Track 3.** Attestations
+      are unsigned: a `SealedResult` is a blob and `keccak256(blob)`, computable
+      by anyone. The coordinator supplies the attester list to `fulfillJob`, so
+      the contract can check only that the addresses are registered and distinct
+      — a dishonest coordinator can name any two registered workers beside any
+      result, and nothing contradicts it. The attestation tokens added in 2.9a
+      fix the equivalent hole *inside* the coordinator and are invisible to a
+      contract. Give workers secp256k1 keys, have them sign the result hash, and
+      have the contract `ecrecover` each one. Cost is ~3.5k gas per attester on
+      a 250–350k transaction, which reverses architecture.md §11 Q3's reasoning.
+      The token then becomes redundant and `/results` gets authentication free.
+      **Do not implement `fulfillJob` before deciding this.**
 - [ ] **2.10b Enforce the reproducibility preconditions at registration.** Byte
       equality holds only for workers sharing one CPU architecture (x86 and ARM
       diverge), with the FFT plan pinned, evaluating on CPU (the `gpu` feature

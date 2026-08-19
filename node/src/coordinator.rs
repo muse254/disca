@@ -2,10 +2,25 @@
 //! agree it produced.
 //!
 //! The coordinator sees ciphertexts and bytecode, never plaintext. It is
-//! trusted only for liveness — it can stall a job, and the escrow refund path
-//! in `bridge.md` §6 covers that, but it cannot forge a result, because the
-//! attestation hash it submits has to be one M registered workers independently
-//! reported.
+//! trusted only for liveness *within this process*: attestation tokens bind each
+//! report to the dispatch that authorised it, so one worker cannot report M
+//! times and the coordinator cannot count a report it never dispatched for.
+//!
+//! **That property does not extend to a third party, and the on-chain design in
+//! `bridge.md` §2 currently assumes it does.** A `SealedResult` is a blob and
+//! `keccak256(blob)` — nothing signed. Anyone can compute it for any blob. The
+//! tokens are visible only to this process, so a contract handed
+//! `fulfillJob(jobId, resultHash, resultBlob, attesters)` can check that the
+//! attester addresses are registered and distinct, and nothing more: a
+//! dishonest coordinator can name any two registered workers beside any result.
+//! No party contradicts it — the workers signed nothing, and the key holder
+//! cannot distinguish a wrong plaintext from a right one (`attestation.md` §1).
+//!
+//! Fixing this needs per-worker signing keys, so that what a worker returns is
+//! evidence rather than a claim (task 2.10i). Zama's fhEVM avoids the problem by
+//! having each coprocessor transact for itself and counting `msg.sender`; the
+//! moment one party votes on behalf of others, unsigned attestations stop
+//! meaning anything off-box.
 //!
 //! For now the coordinator also stands in for the **key holder**: it generates
 //! the keypair, encrypts the inputs and decrypts the winning result. Those are

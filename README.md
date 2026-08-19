@@ -4,6 +4,10 @@ A distributed computer that executes programs under fully homomorphic
 encryption: nodes evaluate circuits over ciphertexts they cannot decrypt, and
 agreement between independent nodes is what makes a result trustworthy.
 
+Agreement is currently established *inside* the coordinator. Making it
+verifiable by a third party needs per-worker signatures, which do not exist yet
+— see [tasks.md](docs/tasks.md) 2.10i before relying on the on-chain design.
+
 Design docs: [architecture.md](docs/architecture.md) (constraints, trust model)
 · [bridge.md](docs/bridge.md) (Ethereum boundary)
 · [attestation.md](docs/attestation.md) (why M-of-N, and what it costs)
