@@ -45,7 +45,7 @@ jobs:
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: clippy
+          shared-key: workspace
       # --all-features is a no-op today — nothing in the workspace is optional
       # on `main` yet — and is here because task 2.11b asks for it ahead of the
       # branch that gates `logic_gates` behind `boolean-circuits` and `--faulty`
@@ -84,17 +84,24 @@ jobs:
     # opt-level = 3 for dependencies in dev and test profiles, without which the
     # adder tests take ~8 minutes to *run* instead of seconds. First build on a
     # cold cache is the slow one.
-    timeout-minutes: 60
+    # Sized for a cold cache. tfhe at opt-level 3 on a two-core runner is the
+    # floor here; warm runs are minutes.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
         with:
-          key: test
+          # One cache for every job. Keyed per job, clippy warmed a 123 MB cache
+          # that this job could not see, and it compiled tfhe from cold.
+          shared-key: workspace
 
-      # Builds what would actually ship, with default features, so a release
-      # binary that does not link is caught here and not at a tag.
-      - name: build (default features)
-        run: cargo build --workspace --locked
+      # Default features must still compile: everything else here runs with
+      # --all-features, which would hide a break behind a feature gate.
+      # `check` rather than `build` on purpose --- a second codegen of tfhe at
+      # opt-level 3 costs more wall clock on a 2-core runner than the whole
+      # test run, and the test step below builds the real artifacts anyway.
+      - name: check (default features)
+        run: cargo check --workspace --all-targets --locked
 
       # committee-tally and simple-arithmetic are Rust only so rustc can emit
       # WASM from them; the committed .wasm files are what the tests evaluate.
@@ -119,7 +126,7 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - run: rustup component add llvm-tools-preview
