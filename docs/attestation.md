@@ -134,43 +134,52 @@ disk, 6 rounds each:
 |---|---|---|
 | Default threading | 5 / 6 | 2,996 |
 | `RAYON_NUM_THREADS=1` | 4 / 6 | 5,999 |
+| **FFT plan pinned (`pin_fft_plan`)** | **6 / 6** | **2,838** |
 
-Single-threading does not fix it and costs 2× wall clock. Worse, with the key
-and inputs *fixed on disk across rounds*, different rounds unanimously agreed on
-**different** hashes (`0x333cf70…` in most rounds, `0x17764b7…` in another).
-There is no canonical encoding that a correct worker converges on — the whole
-population drifts. This is not one flaky machine.
+Single-threading does not fix it and costs 2× wall clock, which is what sent
+this investigation looking for a cause other than threading. The telling detail
+was that with the key and inputs *fixed on disk across rounds*, different rounds
+unanimously agreed on **different** hashes (`0x333cf70…` in most, `0x17764b7…`
+in another). A whole population drifting together is not one flaky machine — it
+is every process in that round making the same choice, and a different choice in
+the next round.
+
+That choice is the FFT plan. tfhe-rs benchmarks numerically-equivalent FFT
+algorithms for 10 ms at first use and caches the winner per process, so the
+winner tracks machine load at that instant. Pinning it removes the choice, and
+the third row is the result: 6 of 6, at no cost in wall clock. Full explanation
+in `architecture.md` §3.
 
 ### 5c. What that does to real jobs
 
-`scripts/run-local.sh`, 2-of-3, **all three workers honest**, 12 runs:
+`scripts/run-local.sh`, 2-of-3, **all three workers honest**, 12 runs, before
+and after pinning the FFT plan:
 
-| Outcome | Runs | |
+| Outcome | Unpinned | **Pinned** |
 |---|---|---|
-| All 3 agreed | 3 | Settled cleanly |
-| 2 agreed, 1 diverged | 6 | Settled — **and logged an honest worker as an attestation disagreement** |
-| All 3 differed | 3 | **Job failed**, no quorum |
+| All 3 agreed, settled cleanly | 3 | **12** |
+| 2 agreed, 1 diverged — settled, but **logged an honest worker as disagreeing** | 6 | **0** |
+| All 3 differed — **job failed**, no quorum | 3 | **0** |
 
-These figures are **pre-fix** — measured before the FFT plan was pinned. They
-are kept because they are the evidence that motivated the investigation; see §6
-for the measurements after the fix.
+Unpinned, with zero dishonest participants: **25% of jobs failed outright, and
+50% falsely accused an honest worker.** The disagreement warning — the
+mechanism's entire diagnostic output — was wrong half the time.
 
-So with zero dishonest participants, unpinned: **25% of jobs fail outright, and 50% of
-jobs falsely accuse an honest worker of faulty attestation.** The disagreement
-warning — the mechanism's entire diagnostic output — is wrong half the time.
+Pinned: 12 of 12 settle, and no honest worker is ever accused.
 
 The shipped demo is worse, because it deliberately runs one faulty worker, which
 leaves exactly two honest workers who must agree. `scripts/run-local.sh` at its
 defaults, 8 runs:
 
-| Outcome | Runs |
-|---|---|
-| `job settled result=93` | **2** |
-| `did not reach 2-of-3 agreement` | **6** |
+| Outcome | Unpinned | **Pinned** |
+|---|---|---|
+| `job settled result=93` | 2 | **8** |
+| `did not reach 2-of-3 agreement` | 6 | **0** |
 
-**Unpinned, the demo succeeded 25% of the time.** (Pinned it settles 6 of 6 —
-§6.) The
-sample log in that description is a real run; it is also the minority case.
+**Unpinned, the demo succeeded 25% of the time. Pinned, 8 of 8 settle on the
+correct result**, and the only worker ever reported as disagreeing is the one
+deliberately made faulty — which is the mechanism doing exactly what it exists
+to do.
 
 ### 5d. The alternatives, costed against the same job
 
@@ -178,8 +187,8 @@ sample log in that description is a real run; it is also the minority case.
 |---|---|---|---|
 | Trust one worker | 0 | 1× (1.4 s) | Returns wrong answers silently. Not verification. |
 | Verifier re-executes | 1 extra evaluation (1.4 s) | 1× | Defeats the purpose — the verifier could have run the job |
-| **M-of-N on result bytes, FFT plan pinned (current)** | **~48 µs** | **3× (≈3.0 s)** | **Yes — settles 6 of 6 demo runs** |
-| M-of-N on result bytes, unpinned (what motivated this doc) | ~48 µs | 3× (≈3.0 s) | No — settled 25% of demo runs |
+| **M-of-N on result bytes, FFT plan pinned (current)** | **~48 µs** | **3× (≈3.0 s)** | **Yes — 8/8 demo runs, 12/12 all-honest** |
+| M-of-N on result bytes, unpinned (what motivated this doc) | ~48 µs | 3× (≈3.0 s) | No — settled 2 of 8 demo runs |
 | M-of-N on decrypted plaintext | ~75 ms × N ≈ **225 ms** | 3× (≈3.0 s) | Yes, if divergent results decrypt identically — see caveat below |
 | Optimistic challenge (L1) | 0 normally; 1 evaluation per challenge | 1× + challenges | Not built; needs a dispute window and stake |
 | ZK proof of evaluation (L2) | Not measurable | 1× | Not available for tfhe-rs |
@@ -206,10 +215,12 @@ an unverified FHE coprocessor returns numbers nobody should believe (§1).
 were measured *unpinned* and are the reason this document exists: 25% of
 all-honest jobs failed, 50% slandered an honest worker, and the demo settled
 twice in eight attempts. The cause turned out to be tfhe-rs benchmarking FFT
-algorithms at first use rather than any randomness in evaluation. With
-`pin_fft_plan` (architecture.md §3) the demo settles 6 of 6 and disagreement
-fires only on the genuinely faulty worker. Byte equality *is* available; it just
-is not the default.
+algorithms at first use rather than any randomness in evaluation.
+
+With `pin_fft_plan` (architecture.md §3), re-measured on the same methodology:
+**12 of 12 all-honest runs settle with no worker falsely accused, and 8 of 8
+demo runs settle on the correct result.** Byte equality *is* available; it just
+is not the default, and nothing in tfhe-rs's documentation says so.
 
 Two consequences that are easy to miss:
 

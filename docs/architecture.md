@@ -221,17 +221,28 @@ Hash disagreement → job marked disputed, escrow refunded (slashing is roadmap)
 | L1 | Optimistic challenge window: anyone re-executes and disputes a result hash | Stretch |
 | L2 | ZK proof of correct homomorphic evaluation; threshold-FHE decryption; stake/slashing | Roadmap (whitepaper alignment) |
 
-## 8. Workspace layout (post-hackathon)
+## 8. Workspace layout
 
 ```
 disca/
-  primitives/     # IR, CircuitOp set, (stretch) partitioning — pure, no I/O
-  node/           # binary: --role coordinator|worker; transport + chain watcher
-  bridge/         # Foundry project: DiscaBridge.sol, demo consumer, scripts
-  disca-cli/      # parse wasm→bytecode; keygen; register helpers
-  simple-arithmetic/  # sample program (add real demo programs alongside)
-  docs/           # this file, bridge.md
+  primitives/           # IR, CircuitOp set, evaluator, bytecode, wire format
+    src/program.rs      #   WASM -> IR -> CircuitOp, stack-machine evaluation
+    src/validate.rs     #   static circuit checks + partitioning split points
+    src/bytecode.rs     #   canonical encoding + keccak256 program hash
+    src/wire.rs         #   ciphertext boundary, commitments, SealedResult
+    examples/           #   size_probe, inspect, cross_process, key_probe
+  node/                 # coordinator | worker | demo roles
+    src/coordinator.rs  #   job prep, fan-out, M-of-N aggregation, key holder
+    src/worker.rs       #   validate, evaluate, seal, report
+    src/protocol.rs     #   messages; src/transport.rs — sync HTTP
+  disca-cli/            # parse wasm->bytecode; keygen (still stubs)
+  committee-tally/      # demo circuit; simple-arithmetic/ — sample program
+  scripts/run-local.sh  # 1 coordinator + 3 workers, one deliberately faulty
+  docs/                 # this file, bridge.md, attestation.md, tasks.md,
+                        # tfhe-determinism-request.md
 ```
+
+Not yet built: `bridge/` (Foundry project — Track 3) and the chain watcher.
 
 ## 9. Scope fence for the 12 days
 
