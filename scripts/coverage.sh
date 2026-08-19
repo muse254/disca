@@ -86,7 +86,9 @@ cargo llvm-cov --no-report "${COVER_ARGS[@]}"
 # report needs per line: it drops the lines inside inline `#[cfg(test)]`
 # modules, which llvm-cov counts as covered code when they are the code doing
 # the covering. See scripts/lib/coverage_report.py.
-lcov="$(mktemp -t disca-coverage)"
+# Spelled-out template: GNU mktemp rejects a bare `-t prefix` and requires at
+# least three X's, where BSD mktemp on macOS accepts it. See check-deps.sh.
+lcov="$(mktemp "${TMPDIR:-/tmp}/disca-coverage.XXXXXX")"
 trap 'rm -f "$lcov"' EXIT
 
 cargo llvm-cov report "${REPORT_ARGS[@]}" --lcov --output-path "$lcov"

@@ -62,7 +62,10 @@ if [ "$report" -eq 1 ]; then
   # commit nobody meant to make.
   echo
   echo "==> available updates (nothing is written)"
-  before="$(mktemp -t disca-lock)"
+  # GNU mktemp requires at least three X's in the template and rejects a bare
+  # `-t prefix`, which BSD mktemp on macOS accepts. Spell the template out so
+  # the script behaves the same on a developer laptop and on a Linux runner.
+  before="$(mktemp "${TMPDIR:-/tmp}/disca-lock.XXXXXX")"
   cp Cargo.lock "$before"
   cargo update --dry-run --workspace || true
   if ! cmp -s Cargo.lock "$before"; then
