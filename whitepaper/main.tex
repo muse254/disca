@@ -336,6 +336,22 @@ The scheme tolerates $N - M$ faulty or absent nodes, and the choice of $M$ trade
 Where $M \leq N/2$, two different answers can each reach the threshold; that state means more nodes are faulty than the scheme tolerates, and the correct response is to refuse rather than to select between them.
 Where $M = N$, a single slow or unreachable node blocks every job.
 
+To make this concrete, consider a job dispatched to three nodes with the threshold set to two.
+Each node evaluates the circuit independently and returns a hash of its result ciphertext:
+
+\begin{verbatim}
+node A   ->  0xda91574b...4dde
+node B   ->  0xda91574b...4dde
+node C   ->  0x5dad1d95...ce75
+\end{verbatim}
+
+Two nodes returned identical bytes, the threshold is met, and the result behind that hash is accepted.
+The third is recorded as disagreeing.
+No node was told what to produce and none communicated with the others; A and B match because they independently computed the same ciphertext, and the coordinator identifies C from the evidence rather than from any prior knowledge of which node might be faulty.
+
+Raising the threshold to three makes the same job fail: unanimity is unreachable while one node disagrees, and the correct outcome is no result rather than a result two nodes vouch for and a third contradicts.
+That is the trade in the other direction---a stricter threshold buys confidence at the cost of tolerating nothing.
+
 Two unrelated mechanisms share this notation, and the distinction matters because DISCA's roadmap uses the second:
 
 \begin{center}
@@ -367,9 +383,50 @@ The winner therefore depends on machine load at that instant.
 Those algorithms compute the same transform but group their constituent operations differently, and floating-point addition is not associative because every operation rounds.
 A coefficient near a rounding boundary consequently lands one unit either side depending on the ordering.
 
+The step that surprises is why a different algorithm changes the result at all, given that all of them compute the same transform.
+The answer is that floating-point addition is not associative.
+Every operation rounds to the nearest representable value, so regrouping the same additions can change the answer:
+
+\begin{verbatim}
+(1.0 + 1e16) - 1e16  =  0.0     the 1.0 is lost to rounding
+1.0 + (1e16 - 1e16)  =  1.0     it survives
+\end{verbatim}
+
+This is not confined to contrived magnitudes.
+Summing the same sixty-four values sequentially and pairwise differs in the final bit:
+
+\begin{verbatim}
+sequential:  89616922.12479763
+pairwise  :  89616922.12479764
+\end{verbatim}
+
+The atomic step of a Fast Fourier Transform is the \emph{butterfly}: given two values and a twiddle factor $w$, it produces $a + wb$ and $a - wb$.
+A transform over two thousand and forty-eight points is thousands of these arranged in stages, and the competing algorithms differ precisely in how those stages group---which partial sums form first, and how they nest.
+Regrouping is exactly what the examples above show to be unsafe in floating point.
+
+Homomorphic evaluation uses these transforms for polynomial multiplication: integer torus coefficients are converted to floating point, multiplied in the frequency domain, and converted back.
+That final conversion rounds, so a coefficient near a boundary lands on one integer under one grouping and its neighbour under another.
+
 The resulting ciphertext remains valid and decrypts to the correct value---the noise budget absorbs a one-unit difference---but its bytes differ, and bytes are what a hash observes.
-Left unaddressed, honest nodes disagree intermittently and no job settles: in measurement, one quarter of jobs failed outright and half incorrectly reported an honest node as disagreeing.
-Fixing the algorithm selection in advance removes the divergence at no measurable cost.
+The resulting difference is invisible to decryption and decisive to a hash, which is why the failure is so easy to miss: every divergent run still decrypted to the correct answer.
+
+Left unaddressed, honest nodes disagree intermittently and no job settles.
+Measured across twelve runs with every node behaving honestly, and again after fixing the algorithm selection in advance:
+
+\begin{center}
+\begin{tabular}{lrr}
+\hline
+Outcome, all nodes honest & Unfixed & Fixed \\
+\hline
+All three agreed, settled cleanly & 3 & 12 \\
+Settled, but reported an honest node as disagreeing & 6 & 0 \\
+Failed, no threshold reached & 3 & 0 \\
+\hline
+\end{tabular}
+\end{center}
+
+A quarter of jobs failed outright and half incorrectly accused an honest node, which would make any penalty built on that signal punish honest participants.
+Fixing the selection removes the divergence at no measurable cost in evaluation time.
 
 Byte equality is therefore conditional, and the conditions belong in node registration rather than in documentation.
 Nodes must share a processor architecture, since implementations differ between instruction sets; must fix the transform selection identically; and must evaluate on the same class of hardware, since accelerated backends select parameters that are not reproducible at all.
