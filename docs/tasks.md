@@ -236,7 +236,16 @@ to 6 of 6. Full write-up in architecture.md §3.
       `with_deterministic_execution()`). Registration should record and check
       these; until it does, disagreement means divergence, not dishonesty, and
       must not feed slashing. `bridge.md` §2 now states this.
-- [ ] **2.10c Keep the divergence path anyway.** Agreement can still fail for
+- [x] **2.10c Guard reproducibility across processes.**
+      `primitives/tests/determinism_under_concurrency.rs` re-executes its own
+      binary as concurrent children sharing one key and inputs, and fails if
+      they disagree. It has to be cross-process: tfhe caches the FFT plan in a
+      process-global `OnceLock`, so an in-process test passes whether or not the
+      plan is pinned and would not have caught this. Verified to fail when
+      pinning is skipped (`DISCA_SKIP_PIN=1`). It also covers the polynomial
+      size, which has no public accessor — if `ConfigBuilder::default()` ever
+      moves off 2048 the pin covers nothing and this test fails.
+- [ ] **2.10f Keep the divergence path anyway.** Agreement can still fail for
       reasons we have not seen; a disputed job must stay a first-class outcome
       rather than an assertion.
 - [ ] **2.10d Raise it upstream.** `setup_custom_fft_plan` is public but
