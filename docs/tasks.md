@@ -247,6 +247,17 @@ to 6 of 6. Full write-up in architecture.md §3.
       pinning is skipped (`DISCA_SKIP_PIN=1`). It also covers the polynomial
       size, which has no public accessor — if `ConfigBuilder::default()` ever
       moves off 2048 the pin covers nothing and this test fails.
+- [ ] **2.10g Model the faults a deployment would actually hit.** `--faulty`
+      injects one mode: a well-formed wrong answer, i.e. the adversarial case.
+      The divergence we have actually observed was *misconfiguration* — honest
+      workers disagreeing 6 of 12 runs before the FFT plan was pinned. Add fault
+      modes for the realistic causes (mismatched architecture, tfhe version
+      skew, unpinned plan, GPU build) plus crash, hang and garbage output, so
+      the local run exercises what registration will have to reject.
+- [x] **2.10h Keep fault injection and the demo role out of release builds.**
+      `--faulty` is behind the `fault-injection` feature, off by default; the
+      `demo` role is `#[cfg(debug_assertions)]`. A default release build has
+      neither. `scripts/run-local.sh` opts in explicitly.
 - [ ] **2.10f Keep the divergence path anyway.** Agreement can still fail for
       reasons we have not seen; a disputed job must stay a first-class outcome
       rather than an assertion.

@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # Runs one coordinator and three workers as local processes, 2-of-3 attestation.
 #
-# The third worker is deliberately faulty. A job where every worker agrees
-# demonstrates nothing about M-of-N, so the run only means something if one of
-# them disagrees and is outvoted.
+# The third worker is deliberately faulty. A job where every worker agrees is
+# indistinguishable from a job with no verification at all -- you see
+# "job settled" either way -- so the run only demonstrates something if one
+# worker disagrees and is outvoted.
 #
-#   ./scripts/run-local.sh            # honest majority outvotes a faulty worker
-#   HONEST=1 ./scripts/run-local.sh   # all three honest
+# Both modes are needed to conclude anything. A detector that never fires and
+# one that always fires would each pass a single test; it is the pair that says
+# the mechanism tracks reality:
+#
+#   ./scripts/run-local.sh            # one faulty worker -> detected, outvoted
+#   HONEST=1 ./scripts/run-local.sh   # all honest -> settles, nobody accused
+#   ATTESTERS=3 ./scripts/run-local.sh  # unanimity vs one liar -> fails, correctly
+#
+# Only the fault is staged. The two honest workers are never told to agree --
+# they are separate processes that never talk to each other, and they match
+# because they independently computed the same ciphertext byte for byte.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -22,8 +32,10 @@ if [ ! -f "$PROGRAM" ]; then
   exit 1
 fi
 
-echo "building node..."
-cargo build --release -p node
+# fault-injection is off by default, so a release build cannot be told to
+# return a wrong answer. This demo needs exactly that, so it opts in explicitly.
+echo "building node (with fault-injection)..."
+cargo build --release -p node --features fault-injection
 
 NODE=target/release/node
 
