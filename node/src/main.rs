@@ -343,6 +343,11 @@ mod tests {
         );
     }
 
+    // `--faulty` is a `fault-injection` flag: it does not exist in a default
+    // build, so neither can a test that parses it. The default build gets its
+    // own assertion below — that the flag is *refused* — which is the property
+    // the gate exists to provide.
+    #[cfg(feature = "fault-injection")]
     #[test]
     fn a_worker_takes_its_identity_and_its_behaviour_from_the_command_line() {
         let cli = Cli::try_parse_from(["node", "worker", "--id", "worker-3", "--faulty"]).unwrap();
@@ -365,6 +370,7 @@ mod tests {
         assert_eq!(coordinator, "127.0.0.1:8080");
     }
 
+    #[cfg(feature = "fault-injection")]
     #[test]
     fn an_honest_worker_is_the_default() {
         // Faulty must be something you ask for. A worker that returns wrong
@@ -374,5 +380,19 @@ mod tests {
             panic!("parsed as the wrong role");
         };
         assert!(!faulty);
+    }
+
+    #[cfg(not(feature = "fault-injection"))]
+    #[test]
+    fn a_default_build_has_no_way_to_be_told_to_lie() {
+        // The stronger half of the pair above. Without the feature there is no
+        // flag, so `--faulty` is an unknown argument and the worker refuses to
+        // start rather than starting honest and ignoring what it was asked —
+        // which would look identical to a build that had quietly lost the gate.
+        assert!(Cli::try_parse_from(["node", "worker", "--id", "worker-1", "--faulty"]).is_err());
+
+        // ...and the role still parses without it, so the refusal is about the
+        // flag and not about the role.
+        assert!(Cli::try_parse_from(["node", "worker", "--id", "worker-1"]).is_ok());
     }
 }

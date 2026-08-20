@@ -308,7 +308,11 @@ fn report(coordinator: &str, report: JobReport) {
 #[cfg(test)]
 mod tests {
     use primitives::program::{DiscaProgram, Program};
+    // Only the fault-injection test encrypts and decrypts for real; a default
+    // build would carry these as unused imports.
+    #[cfg(feature = "fault-injection")]
     use tfhe::prelude::FheDecrypt;
+    #[cfg(feature = "fault-injection")]
     use tfhe::{ClientKey, ConfigBuilder, generate_keys};
 
     use super::*;
@@ -405,6 +409,10 @@ mod tests {
         assert!(evaluate(&dispatch, Behaviour::Honest).is_err());
     }
 
+    // `Behaviour::Faulty` only exists behind `fault-injection`, so this test
+    // only exists there too. Nothing is lost in a default build: the behaviour
+    // under test is not compiled into it.
+    #[cfg(feature = "fault-injection")]
     #[test]
     fn a_faulty_worker_attests_to_a_different_hash_than_an_honest_one() {
         // This is what makes scripts/run-local.sh mean anything. If injection
@@ -441,6 +449,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "fault-injection")]
     fn encrypted(value: i32, client_key: &ClientKey) -> InputBlob {
         committed(wire::encode(&wire::encrypt_input(value, client_key).unwrap()).unwrap())
     }

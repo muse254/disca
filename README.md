@@ -80,6 +80,8 @@ and a red pipeline cannot disagree about why:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
+cargo check --workspace --all-targets --locked   # ...and default features still build
+cargo test -p node --locked                      # ...and behave (no --faulty flag)
 scripts/check-deps.sh          # lockfile in sync; tfhe still pinned exactly
 scripts/coverage.sh --open     # line coverage per crate, as a browsable report
 ```
@@ -88,6 +90,11 @@ scripts/coverage.sh --open     # line coverage per crate, as a browsable report
 not compiled by an ordinary build, so nothing type-checks it and nothing runs
 its tests — it rots quietly while the coverage number stays flattering
 ([tasks.md](docs/tasks.md) 2.11b).
+
+Neither is the pass *without* it. `--all-features` cannot see a missing feature
+gate, because under it everything is enabled; a default build is what a release
+actually compiles, and it is the one that has to prove there is no way to ask a
+worker for a wrong answer.
 
 `--locked` is the other half of the `tfhe` pin. The exact version in the
 workspace manifest is what makes evaluation byte-reproducible

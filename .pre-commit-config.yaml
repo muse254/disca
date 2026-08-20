@@ -30,16 +30,26 @@ repos:
         types: [rust]
         pass_filenames: false
 
-      # --all-features changes nothing today (nothing in the workspace is
-      # optional yet) and is here ahead of the branch that gates `logic_gates`
-      # and `--faulty` behind features, per task 2.11b: code behind an
+      # --all-features, because `logic_gates` sits behind `boolean-circuits` and
+      # `--faulty` behind `fault-injection` (task 2.11b): code behind an
       # off-by-default feature is never compiled by an ordinary build, so
       # nothing type-checks it and it rots. --all-targets extends that to tests
       # and examples. --locked so a manifest edit committed without its
       # lockfile update fails here rather than in CI.
       - id: cargo-check
-        name: cargo check
+        name: cargo check (all features)
         entry: cargo check --workspace --all-targets --all-features --locked
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # The other half, and not redundant: a feature gate can be missing from
+      # test code as easily as from production code, and --all-features cannot
+      # see it. This is what a release build actually compiles. Cheap — the
+      # dependency graph is identical, so only the workspace crates rebuild.
+      - id: cargo-check-default
+        name: cargo check (default features)
+        entry: cargo check --workspace --all-targets --locked
         language: system
         types: [rust]
         pass_filenames: false
