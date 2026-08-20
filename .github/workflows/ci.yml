@@ -127,10 +127,22 @@ jobs:
           # That is not hypothetical: in run 32255892950 `check` saved at
           # 13:06:48 and this job restored nothing.
           key: test
-          # A test failure or a timeout must not throw away an hour of
-          # dependency codegen; the next run should start warm and get to the
-          # actual failure in minutes.
-          cache-on-failure: true
+          # cache-on-failure is deliberately OFF, and that is the opposite of
+          # the obvious choice. It was on, and it poisoned this cache.
+          #
+          # `concurrency: cancel-in-progress` kills this job on every new push,
+          # usually mid-tfhe. With cache-on-failure the dying job wrote its
+          # half-built target directory under the canonical key — and a GitHub
+          # cache key is immutable, while rust-cache skips saving whenever it
+          # restored a full match. So the partial tree became permanent: run
+          # 32387542640 restored it, rebuilt everything in 3h15m, logged
+          # "Cache up-to-date", and threw all of it away. Every later run would
+          # have done the same, forever.
+          #
+          # Off, a cancelled run saves nothing and the next one simply tries
+          # again from cold. What it costs is the case this was meant for — a
+          # genuine test failure, where the build was complete and only the
+          # tests failed. That is worth losing to keep the cache truthful.
 
       # committee-tally and simple-arithmetic are Rust only so rustc can emit
       # WASM from them; the committed .wasm files are what the tests evaluate.
