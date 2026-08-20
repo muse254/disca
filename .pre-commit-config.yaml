@@ -4,7 +4,7 @@
 # misspelling or a formatting slip is reported in a second rather than after
 # clippy has finished compiling tfhe.
 fail_fast: true
-default_install_hook_types: [pre-commit]
+default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit]
 repos:
   - repo: https://github.com/crate-ci/typos
@@ -60,6 +60,32 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+
+      # Coverage runs here rather than in CI, and on push rather than on
+      # commit. Both halves of that are deliberate.
+      #
+      # Not in CI: it needs its own cold build of tfhe — a second one, because
+      # cargo-llvm-cov builds into a different target directory with
+      # RUSTC_WRAPPER set and can share nothing with the test job — and on a
+      # private repo's 2-vCPU runner that is hours of billable time per push.
+      # The numbers it produces are the same ones you can produce here.
+      #
+      # Not on commit: warm it is about a minute, cold about five, and it
+      # measures the whole workspace, which is not what a single commit is. A
+      # hook that costs a minute every commit is a hook people disable, and a
+      # disabled hook enforces nothing. On push it runs once, over the state
+      # that is actually leaving the machine.
+      #
+      # `verbose: true` so the per-crate table is printed even when it passes —
+      # a floor you only see when it breaks tells you nothing about the margin.
+      - id: cargo-coverage
+        name: coverage floors (per crate)
+        entry: scripts/coverage.sh --check
+        language: system
+        files: '\.rs$|^scripts/(coverage\.sh|lib/coverage_report\.py)$'
+        pass_filenames: false
+        stages: [pre-push]
+        verbose: true
 
       # Dependency and lockfile hygiene. Deliberately *not* `cargo update`:
       # rewriting Cargo.lock on every commit is how the exact `tfhe` pin gets

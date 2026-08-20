@@ -73,8 +73,9 @@ disagreeing rather than as anything failing loudly.
 
 ## Checks
 
-CI runs these, and so can you — same commands, same flags, so a green laptop
-and a red pipeline cannot disagree about why:
+CI runs the first five, and so can you — same commands, same flags, so a green
+laptop and a red pipeline cannot disagree about why. The last one runs only
+here; see [Coverage](#coverage):
 
 ```sh
 cargo fmt --all --check
@@ -83,7 +84,7 @@ cargo test --workspace --all-features --locked
 cargo check --workspace --all-targets --locked   # ...and default features still build
 cargo test -p node --locked                      # ...and behave (no --faulty flag)
 scripts/check-deps.sh          # lockfile in sync; tfhe still pinned exactly
-scripts/coverage.sh --open     # line coverage per crate, as a browsable report
+scripts/coverage.sh --check    # local only: per-crate coverage floors
 ```
 
 `--all-features` is not decoration. A module behind an off-by-default feature is
@@ -112,19 +113,38 @@ core — pure functions with a checkable answer, and the thing an attestation is
 claim about — so it is held high. Much of `node` is socket binding, thread
 spawning and blocking receive loops that only `scripts/run-local.sh` exercises;
 tests written to walk those lines would raise the number and assert nothing.
-`scripts/coverage.sh --check` applies the floors, and is what CI runs.
+`scripts/coverage.sh --check` applies the floors. It runs on **`pre-push`**, and
+not in CI.
+
+That is a deliberate trade. Coverage needs its own cold build of tfhe — a
+second one, because `cargo-llvm-cov` builds into a different target directory
+with `RUSTC_WRAPPER` set and can share nothing with the test job — and on this
+repo's 2-vCPU runner that is hours of billable time on every push, to produce
+numbers you can produce here in about a minute warm. What it costs is
+enforcement: the floors hold on the machine of whoever is pushing, and a push
+made with `--no-verify` is not checked at all. If that stops being an
+acceptable trade, the job to restore is a `push:`-on-`main` one — per merge
+rather than per PR push.
+
+`--open` instead of `--check` writes and opens the browsable HTML report.
 
 [llvm-cov]: https://github.com/taiki-e/cargo-llvm-cov
 
 ### Pre-commit hook
 
-Formatting, linting and dependency hygiene, before the commit rather than after
-the push. Install [`pre-commit`](https://pre-commit.com/) (`brew install
-pre-commit` on macOS), then:
+Formatting, linting and dependency hygiene on **commit**; coverage floors on
+**push**, because that check measures the whole workspace and takes about a
+minute — a per-commit cost that size is one people turn off, and a disabled
+hook enforces nothing. Install [`pre-commit`](https://pre-commit.com/) (`brew
+install pre-commit` on macOS), then:
 
 ```sh
-pre-commit install
+pre-commit install   # installs both the pre-commit and pre-push hooks
 ```
+
+Both, because `default_install_hook_types` asks for both — a plain
+`pre-commit install` without it would leave the coverage gate uninstalled and
+silent.
 
 The hook deliberately does **not** run `cargo update`. Rewriting `Cargo.lock` on
 every commit is exactly how the exact `tfhe` pin gets lost, and losing it breaks

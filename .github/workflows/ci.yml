@@ -37,9 +37,9 @@ jobs:
       - run: rustup component add rustfmt
       - run: cargo fmt --all --check
 
-  # The gate in front of the two expensive jobs. Check-only, so it costs
-  # minutes rather than hours, and `test` and `coverage` wait on it: a compile
-  # error used to burn a two-hour coverage runner and report nothing.
+  # The gate in front of the expensive job. Check-only, so it costs minutes
+  # rather than hours, and `test` waits on it: a compile error used to burn a
+  # two-hour runner and report nothing.
   check:
     name: check and clippy
     runs-on: ubuntu-latest
@@ -146,9 +146,7 @@ jobs:
 
       # `primitives/tests/determinism_under_concurrency.rs` spawns concurrent
       # child processes and is the guard on byte-reproducible evaluation. It
-      # runs here uninstrumented, which is the shape a worker actually runs in —
-      # the coverage job runs it again under instrumentation, and the two
-      # agreeing is part of the point.
+      # runs here uninstrumented, which is the shape a worker actually runs in.
       - name: test
         run: cargo test --workspace --all-features --locked
 
@@ -160,68 +158,11 @@ jobs:
       - name: test node without its features
         run: cargo test -p node --locked
 
-  coverage:
-    name: coverage
-    runs-on: ubuntu-latest
-    needs: check
-    # Same cold-cache floor as `test`, and the same reasoning — see its comment.
-    # cargo-llvm-cov builds into target/llvm-cov-target with RUSTC_WRAPPER set,
-    # so it cannot reuse `test`'s artifacts and pays for tfhe itself.
-    timeout-minutes: 240
-    # Measured: dropping debug info leaves every coverage number identical
-    # (llvm-cov reads the __llvm_covmap section, not DWARF) and takes the
-    # cached target directory from 2.8 GB to 596 MB — which is uploaded and
-    # downloaded on every run.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    steps:
-      - uses: actions/checkout@v5
-      - run: rustup component add llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # Its own key, because this job builds into target/llvm-cov-target
-          # with RUSTC_WRAPPER set and shares no fingerprint with `test`.
-          # rust-cache follows the nested target directory (it carries a
-          # CACHEDIR.TAG), so the dependency artifacts inside it are cached.
-          #
-          # Worth knowing before optimising this job: cargo-llvm-cov's wrapper
-          # adds -C instrument-coverage to workspace crates *only* — tfhe is
-          # built here exactly as `test` builds it — and its default clean
-          # removes workspace artifacts, not dependencies. Measured locally, a
-          # warm re-run rebuilds primitives and node and nothing else: 63 s
-          # against 285 s cold. This cache is the whole difference between a
-          # job that takes minutes and one that does not finish.
-          key: coverage
-          # This job is the one that most needs its cache: a cold build of
-          # tfhe is the longest thing in CI. Without this, a run that fails or
-          # times out saves nothing and the next one starts cold again — the
-          # loop this job was stuck in. (`Post Run Swatinem/rust-cache@v2` is
-          # listed as *skipped* on the failed run, which is what that looks
-          # like from the outside.)
-          cache-on-failure: true
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
-
-      # Same script a developer runs locally, so a number here is reproducible
-      # there. --check enforces a floor per crate; the floors and the reasoning
-      # behind each live in scripts/lib/coverage_report.py.
-      - name: measure coverage
-        run: scripts/coverage.sh --check --lcov target/lcov.info
-
-      - name: upload the HTML report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-html
-          path: target/llvm-cov/html/
-          retention-days: 14
-
-      - name: upload lcov
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-lcov
-          path: target/lcov.info
-          retention-days: 14
+# There is deliberately no coverage job. It measured the same numbers a
+# developer can measure, and paid for a second cold build of tfhe to do it —
+# on a private repo's 2-vCPU runner that is hours of billable time per push,
+# for a report nobody reads until something drops below a floor. Coverage runs
+# locally instead, on `pre-push`, via .pre-commit-config.yaml. See the Coverage
+# section of README.md for the trade that makes: the floors are enforced on the
+# machine of whoever is pushing, and not enforced at all for a push that skips
+# the hook.

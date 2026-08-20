@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Measures line coverage with cargo-llvm-cov, and enforces a floor per crate.
 #
-# CI and a developer's laptop run this same script, so a number that passes
-# locally cannot fail in CI for a reason nobody can reproduce.
+# This runs locally, not in CI: on `pre-push`, via .pre-commit-config.yaml.
+# Coverage needs a second cold build of tfhe (cargo-llvm-cov builds into its own
+# target directory with RUSTC_WRAPPER set and shares nothing with the test
+# build), which on a 2-vCPU runner is hours of billable time per push for
+# numbers a developer can get here in about a minute warm. The cost of that
+# trade is that a push made with --no-verify is not checked at all.
 #
 #   scripts/coverage.sh              # summary + HTML report
 #   scripts/coverage.sh --open       # ... and open the HTML report
@@ -26,7 +30,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h | --help)
-      sed -n '2,12p' "$0"
+      sed -n '2,16p' "$0"
       exit 0
       ;;
     *)
@@ -43,13 +47,11 @@ if ! cargo llvm-cov --version >/dev/null 2>&1; then
   exit 1
 fi
 
-# --all-features is a no-op on `main` as it stands: nothing in the workspace is
-# optional yet. It is here because task 2.11b asks for it, and because the
-# branch that gates `logic_gates` behind `boolean-circuits` and `--faulty`
-# behind `fault-injection` is what makes it load-bearing. Code behind an
-# off-by-default feature is never compiled by an ordinary build, so nothing
-# type-checks it and no test runs it — it rots while the coverage number, which
-# does not know it exists, stays flattering.
+# --all-features because `logic_gates` sits behind `boolean-circuits` and
+# `--faulty` behind `fault-injection`. Code behind an off-by-default feature is
+# never compiled by an ordinary build, so nothing type-checks it and no test
+# runs it — it rots while the coverage number, which does not know it exists,
+# stays flattering (task 2.11b).
 COVER_ARGS=(
   --workspace
   --all-features
