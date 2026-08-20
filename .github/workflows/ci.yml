@@ -37,26 +37,41 @@ jobs:
       - run: rustup component add rustfmt
       - run: cargo fmt --all --check
 
-  clippy:
-    name: clippy
+  # The gate in front of the two expensive jobs. Check-only, so it costs
+  # minutes rather than hours, and `test` and `coverage` wait on it: a compile
+  # error used to burn a two-hour coverage runner and report nothing.
+  check:
+    name: check and clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: workspace
-      # --all-features is a no-op today — nothing in the workspace is optional
-      # on `main` yet — and is here because task 2.11b asks for it ahead of the
-      # branch that gates `logic_gates` behind `boolean-circuits` and `--faulty`
-      # behind `fault-injection`. Code behind an off-by-default feature is never
-      # compiled by an ordinary build, so nothing type-checks it and it rots.
-      # --all-targets extends the same reach to tests, examples and benches.
+          # Its own key. Check output is `.rmeta`; the jobs below need `.rlib`s,
+          # and a GitHub cache key is immutable — whoever finishes first claims
+          # it. This job finishes in minutes, so sharing a key with `test` means
+          # this job always wins and `test` restores a cache with no codegen in
+          # it, recompiling tfhe from cold on every run forever.
+          key: check
+      # --all-features, because `logic_gates` sits behind `boolean-circuits` and
+      # `--faulty` behind `fault-injection`. Code behind an off-by-default
+      # feature is never compiled by an ordinary build, so nothing type-checks
+      # it and it rots (task 2.11b). --all-targets extends the same reach to
+      # tests, examples and benches.
       #
       # --locked so a manifest edit committed without its Cargo.lock update
       # fails here rather than resolving to whatever is newest today; the tfhe
       # pin is load-bearing (docs/architecture.md §3).
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      # The other half, and not redundant: --all-features cannot see a missing
+      # feature gate, because under it every gate is open. This is the shape a
+      # release build actually compiles, and it is where the `fault-injection`
+      # gate has to hold. It runs in this job rather than its own so that it
+      # reuses the dependency metadata clippy just built, in the same target
+      # directory — a separate job would build all of it again.
+      - run: cargo check --workspace --all-targets --locked
 
   deps:
     name: dependency hygiene
@@ -80,28 +95,42 @@ jobs:
   test:
     name: build and test
     runs-on: ubuntu-latest
-    # Generous, but the floor is compiling tfhe: the workspace sets
-    # opt-level = 3 for dependencies in dev and test profiles, without which the
-    # adder tests take ~8 minutes to *run* instead of seconds. First build on a
-    # cold cache is the slow one.
-    # Sized for a cold cache. tfhe at opt-level 3 on a two-core runner is the
-    # floor here; warm runs are minutes.
-    timeout-minutes: 120
+    needs: check
+    # Sized for a *cold* cache, and only for that. The floor is one crate: tfhe
+    # at opt-level 3 (the workspace optimises dependencies in dev and test, task
+    # 0.4, without which the adder tests take ~8 minutes to run instead of
+    # seconds). This repo is private, so `ubuntu-latest` is 2 vCPUs and 7 GB,
+    # and on x86_64 tfhe compiles an AVX2/AVX-512 fan-out that an aarch64
+    # laptop never builds — local timings do not predict it. Cargo's unit of
+    # caching is the crate, so a run that dies part-way through tfhe saves
+    # nothing usable and the next one starts over; the timeout has to be long
+    # enough to get through it once. After that the cache carries it and warm
+    # runs are minutes.
+    timeout-minutes: 240
+    # Debug info is the bulk of what gets cached, and none of it is needed to
+    # know a test failed. line-tables-only keeps file and line in a backtrace —
+    # the reason RUST_BACKTRACE is on above — and drops the rest.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
         with:
-          # One cache for every job. Keyed per job, clippy warmed a 123 MB cache
-          # that this job could not see, and it compiled tfhe from cold.
-          shared-key: workspace
-
-      # Default features must still compile: everything else here runs with
-      # --all-features, which would hide a break behind a feature gate.
-      # `check` rather than `build` on purpose --- a second codegen of tfhe at
-      # opt-level 3 costs more wall clock on a 2-core runner than the whole
-      # test run, and the test step below builds the real artifacts anyway.
-      - name: check (default features)
-        run: cargo check --workspace --all-targets --locked
+          # Deliberately NOT shared with `check`. A GitHub cache key is
+          # immutable: the first job to finish writes it and every later job
+          # with the same key is refused. `check` finishes in minutes with a
+          # cache of `.rmeta` — check output — while this job needs `.rlib`s,
+          # the codegen that actually costs hours. Sharing one key means
+          # `check` always wins the race, this job restores a cache with no
+          # codegen in it, and tfhe is compiled from cold on every run forever.
+          # That is not hypothetical: in run 32255892950 `check` saved at
+          # 13:06:48 and this job restored nothing.
+          key: test
+          # A test failure or a timeout must not throw away an hour of
+          # dependency codegen; the next run should start warm and get to the
+          # actual failure in minutes.
+          cache-on-failure: true
 
       # committee-tally and simple-arithmetic are Rust only so rustc can emit
       # WASM from them; the committed .wasm files are what the tests evaluate.
@@ -123,18 +152,54 @@ jobs:
       - name: test
         run: cargo test --workspace --all-features --locked
 
+      # `node` is the only crate whose *behaviour* differs without a feature: a
+      # default build has no `--faulty` flag, and the test asserting the flag is
+      # refused only exists there. Under --all-features it is not compiled, so
+      # without this step it would be checked and never run. Only `node`,
+      # because the FHE suite is the expensive part and it is feature-blind.
+      - name: test node without its features
+        run: cargo test -p node --locked
+
   coverage:
     name: coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    needs: check
+    # Same cold-cache floor as `test`, and the same reasoning — see its comment.
+    # cargo-llvm-cov builds into target/llvm-cov-target with RUSTC_WRAPPER set,
+    # so it cannot reuse `test`'s artifacts and pays for tfhe itself.
+    timeout-minutes: 240
+    # Measured: dropping debug info leaves every coverage number identical
+    # (llvm-cov reads the __llvm_covmap section, not DWARF) and takes the
+    # cached target directory from 2.8 GB to 596 MB — which is uploaded and
+    # downloaded on every run.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v5
       - run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
-          # Coverage compiles with -C instrument-coverage, so it cannot share a
-          # cache with the ordinary build.
+          # Its own key, because this job builds into target/llvm-cov-target
+          # with RUSTC_WRAPPER set and shares no fingerprint with `test`.
+          # rust-cache follows the nested target directory (it carries a
+          # CACHEDIR.TAG), so the dependency artifacts inside it are cached.
+          #
+          # Worth knowing before optimising this job: cargo-llvm-cov's wrapper
+          # adds -C instrument-coverage to workspace crates *only* — tfhe is
+          # built here exactly as `test` builds it — and its default clean
+          # removes workspace artifacts, not dependencies. Measured locally, a
+          # warm re-run rebuilds primitives and node and nothing else: 63 s
+          # against 285 s cold. This cache is the whole difference between a
+          # job that takes minutes and one that does not finish.
           key: coverage
+          # This job is the one that most needs its cache: a cold build of
+          # tfhe is the longest thing in CI. Without this, a run that fails or
+          # times out saves nothing and the next one starts cold again — the
+          # loop this job was stuck in. (`Post Run Swatinem/rust-cache@v2` is
+          # listed as *skipped* on the failed run, which is what that looks
+          # like from the outside.)
+          cache-on-failure: true
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
