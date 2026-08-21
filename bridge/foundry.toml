@@ -1,0 +1,29 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+
+# Pinned, not floated. The attestation digest is a cross-language contract with
+# `primitives/src/attest.rs` (docs/bridge.md §2a): if a compiler upgrade ever
+# changed how `abi.encodePacked` lays out a string literal or a uint64, the
+# only symptom would be every honest worker appearing to sign badly. A pin
+# makes that a deliberate edit rather than a Tuesday.
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+# fulfillJob is called far more often than DiscaBridge is deployed, and its
+# cost is the number docs/bridge.md §1 makes claims about, so tune for runtime
+# rather than for deploy size.
+optimizer_runs = 1000
+
+# The gas table in test/FulfillGas.t.sol is only meaningful next to the numbers
+# it was produced from.
+gas_reports = ["DiscaBridge"]
+
+# test/AttestationVector.t.sol reads the cross-language vector produced by the
+# Rust side; nothing here writes.
+fs_permissions = [{ access = "read", path = "./test/vectors" }]
+
+[fmt]
+line_length = 100
