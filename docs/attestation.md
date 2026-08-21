@@ -65,20 +65,29 @@ As implemented:
    ciphertexts, same server key hash — to N workers.
 2. Each worker evaluates, compresses the result, and hashes the compressed
    bytes: `keccak256(compressed_result)`. That hash is its **attestation**.
-3. Each worker reports its attestation to the coordinator, echoing the
-   per-worker **attestation token** it was dispatched with. The token is what
-   makes a report attributable to a worker the coordinator actually dispatched
-   to; without it one worker can report M times under M invented names and
-   settle a job single-handedly.
-4. The coordinator settles on the first hash M distinct workers report. At most
-   one report per worker counts.
+3. Each worker **signs** that hash — not on its own, but bound into a
+   domain-separated claim over (job id, bytecode hash, result hash) — with a
+   secp256k1 key whose Ethereum address is its identity, and reports the sealed
+   result with the `(r, s, v)`. See `bridge.md` §2a for the exact preimage.
+4. The coordinator recovers the signer from each report and settles on the first
+   hash M distinct *registered* addresses signed for. The recovered address is
+   the key the inbox is stored under, so one attestation per party is a property
+   of the data structure rather than a check that could be forgotten. An
+   unregistered or unrecoverable signer is rejected and logged.
 5. `bridge.md` §5a: because the hash covers the *compressed* result — the same
    blob emitted on-chain — the contract can recompute
    `keccak256(resultBlob) == resultHash` and confirm the ciphertext it publishes
    is the one that was attested to.
 
-The security claim is then: to forge a result you must control M workers, not
-one. With M = 2, N = 3, a single dishonest worker is outvoted and visible.
+The security claim is then: to forge a result you must control M *registered
+workers' private keys*, not one, and not the coordinator. With M = 2, N = 3, a
+single dishonest worker is outvoted and visible.
+
+The signatures (task 2.10i) are what make the claim survive leaving the
+coordinator's process. Before them, agreement was something the coordinator
+asserted and a contract took on trust — `fulfillJob` received the attester list
+from the coordinator, so it could check those addresses were distinct and
+registered but not that they had computed anything (`bridge.md` §2b).
 
 **The load-bearing assumption is byte reproducibility.** Two honest workers must
 produce byte-identical compressed ciphertexts, or their hashes differ and

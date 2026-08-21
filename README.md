@@ -33,6 +33,14 @@ ATTESTERS=3 ./scripts/run-local.sh  # unanimity required; fails, by design
 The scores `71,93,42,88` are encrypted before they leave the key holder. No
 worker sees a plaintext, and the winning score comes back correct.
 
+Each worker signs its result with a secp256k1 key and the coordinator counts
+agreement over the *recovered* Ethereum addresses, accepting only ones in the
+registry it was started with ([bridge.md](docs/bridge.md) §2a). The local run
+gives each worker a key derived from its `--id`, which is public by
+construction and exists so the script needs no key distribution; a deployment
+passes `--key`. `node worker-address --id <id>` prints the address a worker will
+attest under.
+
 Single process, no network — the quickest way to tell whether a failure is in
 the execution core or the transport. **Debug builds only**: it doubles as the
 key holder, encrypting and decrypting in the same process, which is exactly the

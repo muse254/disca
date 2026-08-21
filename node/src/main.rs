@@ -30,11 +30,18 @@
 //!   It can stall a job — the escrow refund path covers that — but cannot forge
 //!   one, because the attestation hash has to be one M workers independently
 //!   produced.
-//! * **Workers are reachable and identified by address.** Attestation tokens
-//!   bind a report to the dispatch that authorised it, which stops one worker
-//!   reporting M times. They do **not** make a worker unimpersonable to anyone
-//!   who has seen its token; that needs per-worker signing keys
-//!   (`architecture.md` §11 Q3).
+//! * **A worker is its secp256k1 key, and the registry says which keys count.**
+//!   Every report is signed over a claim binding the job id, the program hash
+//!   and the result (task 2.10i), and the coordinator recovers the signer
+//!   rather than being told who it is. What is *not* enforced is that the
+//!   registry passed on the command line matches any on-chain
+//!   `registerWorker` set — there is no chain yet (`bridge.md` §2), so the
+//!   registry is only as good as the operator who typed it.
+//! * **Job ids are unique.** They are bound into every signature, which is what
+//!   stops an attestation being lifted onto another job — but the coordinator
+//!   numbers every job 1 until `submitJob` assigns ids (task 2.9f). Two runs
+//!   over the same program and inputs therefore produce interchangeable
+//!   attestations.
 //! * **One key holder per program, currently the coordinator process.** The
 //!   real design separates them; `KeyHolder` in `coordinator.rs` marks the seam.
 
@@ -75,6 +82,20 @@ enum Role {
         #[arg(long = "worker", required = true)]
         workers: Vec<String>,
 
+        /// Ethereum address whose attestations count. Repeat for each.
+        ///
+        /// This is the worker registry, standing in for `registerWorker` on the
+        /// bridge contract (`bridge.md` §2). It is separate from `--worker`
+        /// deliberately: that flag says where to send work, this one says whose
+        /// signature is worth counting, and the two are different questions.
+        /// Dispatching to a machine does not entitle it to vote, and an address
+        /// can be registered without this coordinator ever dispatching to it.
+        ///
+        /// A worker prints its address at startup, and `node worker-address`
+        /// computes it without starting one.
+        #[arg(long = "registered-worker", required = true)]
+        registry: Vec<String>,
+
         /// How many workers must report the same result (the M in M-of-N).
         #[arg(long, default_value_t = 2)]
         attesters: usize,
@@ -107,10 +128,30 @@ enum Role {
         #[arg(long, default_value = "127.0.0.1:8080")]
         coordinator: String,
 
-        /// Identifies this attester. Stands in for the address it is registered
-        /// under on-chain.
+        /// Names this worker in logs. Not its identity — see `--key`.
         #[arg(long)]
         id: String,
+
+        /// secp256k1 private key, 32 bytes of hex, `0x` optional.
+        ///
+        /// **This is the worker's identity.** Its Ethereum address is what the
+        /// coordinator's `--registered-worker` list must contain and what an
+        /// on-chain registry would hold, and only the holder of this key can
+        /// produce an attestation under that address.
+        ///
+        /// Omit it and the worker derives a key from `--id` instead. That is
+        /// **not a secret** — the id is in every log line, so anyone can
+        /// recompute it — and it exists so `scripts/run-local.sh` can stand up
+        /// a coordinator that already knows three workers' addresses without a
+        /// key-distribution step in a shell script. The worker says so at
+        /// startup. Never do this in a deployment.
+        ///
+        /// Passing a key on a command line puts it in the process table and the
+        /// shell history. That is acceptable for a demo and not for anything
+        /// else; the real answer is a file or an agent socket, and it is not
+        /// built because there is nothing yet to protect.
+        #[arg(long)]
+        key: Option<String>,
 
         /// Deliberately return a wrong result.
         ///
@@ -148,6 +189,26 @@ enum Role {
         faulty: bool,
     },
 
+    /// Print the Ethereum address a worker would attest under, and exit.
+    ///
+    /// The address is what a coordinator registers (`--registered-worker`) and
+    /// what `registerWorker` would pin on-chain, and it is not something an
+    /// operator can compute by hand from a private key. Takes the same `--key`
+    /// and `--id` a worker does, so it answers for the exact key that worker
+    /// will run with.
+    ///
+    /// Prints one line to stdout and nothing else, because it exists to be
+    /// captured by a script. Everywhere else in this binary output is
+    /// `tracing`; this is a value, not telemetry.
+    WorkerAddress {
+        #[arg(long)]
+        id: String,
+
+        /// See `worker --key`. The key is never printed, only its address.
+        #[arg(long)]
+        key: Option<String>,
+    },
+
     /// Run the execution core in a single process, no network.
     ///
     /// Debug builds only. It is a development aid — the quickest way to tell
@@ -167,25 +228,30 @@ fn main() {
         Role::Coordinator {
             bind,
             workers,
+            registry,
             attesters,
             program,
             function,
             inputs,
             deadline_secs,
-        } => coordinator::run(coordinator::Config {
-            bind,
-            workers,
-            attesters,
-            program,
-            function,
-            inputs,
-            deadline: Duration::from_secs(deadline_secs),
+        } => coordinator::parse_registry(&registry).and_then(|registry| {
+            coordinator::run(coordinator::Config {
+                bind,
+                workers,
+                registry,
+                attesters,
+                program,
+                function,
+                inputs,
+                deadline: Duration::from_secs(deadline_secs),
+            })
         }),
 
         Role::Worker {
             bind,
             coordinator,
             id,
+            key,
             #[cfg(feature = "fault-injection")]
             faulty,
         } => {
@@ -198,13 +264,23 @@ fn main() {
             #[cfg(not(feature = "fault-injection"))]
             let behaviour = worker::Behaviour::Honest;
 
-            worker::run(worker::Config {
-                bind,
-                coordinator,
-                id,
-                behaviour,
+            worker::resolve_key(key.as_deref(), &id).and_then(|key| {
+                worker::run(worker::Config {
+                    bind,
+                    coordinator,
+                    id,
+                    key,
+                    behaviour,
+                })
             })
         }
+
+        Role::WorkerAddress { id, key } => worker::resolve_key(key.as_deref(), &id).map(|key| {
+            // The one `println!` in this binary: a script substitutes this into
+            // the coordinator's `--registered-worker`, and a tracing line would
+            // arrive wrapped in a timestamp and a level.
+            println!("{}", primitives::attest::hex_address(&key.address()));
+        }),
 
         #[cfg(debug_assertions)]
         Role::Demo => demo::run(),
@@ -297,6 +373,8 @@ mod tests {
             "coordinator",
             "--worker",
             "127.0.0.1:8081",
+            "--registered-worker",
+            "0x0000000000000000000000000000000000000001",
             "--program",
             "committee-tally/committee_tally.wasm",
             "--function",
@@ -311,6 +389,7 @@ mod tests {
             attesters,
             deadline_secs,
             bind,
+            registry,
             ..
         } = cli.role
         else {
@@ -318,6 +397,7 @@ mod tests {
         };
 
         assert_eq!(inputs, vec![71, 93, 42, 88]);
+        assert_eq!(registry.len(), 1);
         // The defaults run-local.sh and the README rely on.
         assert_eq!(attesters, 2);
         assert_eq!(deadline_secs, 120);
@@ -332,6 +412,8 @@ mod tests {
             Cli::try_parse_from([
                 "node",
                 "coordinator",
+                "--registered-worker",
+                "0x0000000000000000000000000000000000000001",
                 "--program",
                 "p.wasm",
                 "--function",
@@ -341,6 +423,73 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_coordinator_with_an_empty_registry_is_refused_by_the_parser() {
+        // A coordinator with nobody registered can never settle a job: every
+        // report it receives recovers to an address it will reject. Making the
+        // flag required means that is a usage error at startup rather than a
+        // two-minute deadline followed by "no agreement".
+        assert!(
+            Cli::try_parse_from([
+                "node",
+                "coordinator",
+                "--worker",
+                "127.0.0.1:8081",
+                "--program",
+                "p.wasm",
+                "--function",
+                "f",
+                "--inputs",
+                "1",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_worker_address_can_be_computed_without_starting_a_worker() {
+        // scripts/run-local.sh substitutes the output of this into the
+        // coordinator's registry, so the two roles have to agree on what a
+        // given --id/--key implies.
+        let cli = Cli::try_parse_from(["node", "worker-address", "--id", "worker-1"]).unwrap();
+        let Role::WorkerAddress { id, key } = cli.role else {
+            panic!("parsed as the wrong role");
+        };
+
+        assert_eq!(id, "worker-1");
+        assert!(key.is_none());
+
+        // The address this role prints is the one the worker will attest
+        // under. If the two ever diverged, the local run would fail with every
+        // report rejected as "not a registered worker" and nothing pointing at
+        // why.
+        use primitives::attest::{WorkerKey, hex_address};
+
+        let printed = worker::resolve_key(None, &id).unwrap();
+        assert_eq!(
+            hex_address(&printed.address()),
+            hex_address(&WorkerKey::derive("worker-1").address())
+        );
+    }
+
+    #[test]
+    fn a_worker_takes_its_signing_key_from_the_command_line() {
+        let cli = Cli::try_parse_from([
+            "node",
+            "worker",
+            "--id",
+            "worker-1",
+            "--key",
+            "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+        ])
+        .unwrap();
+
+        let Role::Worker { key, .. } = cli.role else {
+            panic!("parsed as the wrong role");
+        };
+        assert!(key.is_some(), "--key must reach the worker");
     }
 
     // `--faulty` is a `fault-injection` flag: it does not exist in a default

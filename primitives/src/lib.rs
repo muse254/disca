@@ -1,3 +1,4 @@
+pub mod attest;
 pub mod bytecode;
 /// The boolean-circuit route to FHE arithmetic. Not used by the evaluator and
 /// not compiled unless the `boolean-circuits` feature is on — see the module

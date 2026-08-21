@@ -349,8 +349,19 @@ Purest privacy story, less visual.
 1. Release-mode op latency → max circuit size for a ≤5 min demo.
 2. Server key distribution: coordinator-served HTTP pull by workers (by hash) —
    confirm 120 MB is manageable in the demo environment (yes on LAN/local).
-3. Attestation scheme: on-chain registered worker address list (simpler) vs
-   ECDSA signature aggregation (cheaper calldata). Leaning: address list.
+3. ~~Attestation scheme: on-chain registered worker address list (simpler) vs
+   ECDSA signature aggregation (cheaper calldata). Leaning: address list.~~
+   **Resolved against the leaning (task 2.10i): per-worker recoverable ECDSA
+   signatures, with the registry kept.** The question was framed as a
+   cost trade-off and it was not one. An address list supplied by the
+   coordinator lets the contract check the named workers are distinct and
+   registered, and nothing else — any M registered addresses can be named beside
+   any result, and the key holder cannot tell a wrong plaintext from a right
+   one, so nothing downstream contradicts it. Workers now sign a
+   domain-separated claim over (job id, bytecode hash, result hash) and the
+   verifier recovers the signer; the registry still decides whose signature
+   counts. Layout and the contract-side checks: `bridge.md` §2a; what was wrong
+   with the original and what the fix costs: §2b.
 4. Transport: HTTP/JSON with bincode payloads (simplest) vs gRPC. Leaning: HTTP.
 5. Chain target for the video: local Anvil (deterministic) vs L2 testnet
    (more impressive). Plan: Anvil for dev, testnet deploy as stretch.
