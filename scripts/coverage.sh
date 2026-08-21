@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Measures line coverage with cargo-llvm-cov, and enforces a floor per crate.
 #
-# This runs locally, not in CI: on `pre-push`, via .pre-commit-config.yaml.
-# Coverage needs a second cold build of tfhe (cargo-llvm-cov builds into its own
-# target directory with RUSTC_WRAPPER set and shares nothing with the test
-# build), which on a 2-vCPU runner is hours of billable time per push for
-# numbers a developer can get here in about a minute warm. The cost of that
-# trade is that a push made with --no-verify is not checked at all.
+# Two places run this: `pre-push` on every developer machine
+# (.pre-commit-config.yaml), and CI on `main` only. Not on PR pushes —
+# cargo-llvm-cov builds into its own target directory with RUSTC_WRAPPER set,
+# so it shares nothing with the test build and pays for the dependency graph
+# twice, for numbers you already saw here a minute earlier. The `main` run is
+# the one `--no-verify` cannot skip.
 #
 #   scripts/coverage.sh              # summary + HTML report
 #   scripts/coverage.sh --open       # ... and open the HTML report

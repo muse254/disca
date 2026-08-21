@@ -73,9 +73,9 @@ disagreeing rather than as anything failing loudly.
 
 ## Checks
 
-CI runs the first five, and so can you — same commands, same flags, so a green
-laptop and a red pipeline cannot disagree about why. The last one runs only
-here; see [Coverage](#coverage):
+CI runs the first five on every push, and so can you — same commands, same
+flags, so a green laptop and a red pipeline cannot disagree about why. The last
+runs locally on `pre-push`, and in CI only on `main`; see [Coverage](#coverage):
 
 ```sh
 cargo fmt --all --check
@@ -84,7 +84,7 @@ cargo test --workspace --all-features --locked
 cargo check --workspace --all-targets --locked   # ...and default features still build
 cargo test -p node --locked                      # ...and behave (no --faulty flag)
 scripts/check-deps.sh          # lockfile in sync; tfhe still pinned exactly
-scripts/coverage.sh --check    # local only: per-crate coverage floors
+scripts/coverage.sh --check    # per-crate coverage floors; pre-push, and main
 ```
 
 `--all-features` is not decoration. A module behind an off-by-default feature is
@@ -113,18 +113,15 @@ core — pure functions with a checkable answer, and the thing an attestation is
 claim about — so it is held high. Much of `node` is socket binding, thread
 spawning and blocking receive loops that only `scripts/run-local.sh` exercises;
 tests written to walk those lines would raise the number and assert nothing.
-`scripts/coverage.sh --check` applies the floors. It runs on **`pre-push`**, and
-not in CI.
+`scripts/coverage.sh --check` applies the floors, and runs in two places:
+on **`pre-push`** locally, and in CI on **`main` only**.
 
-That is a deliberate trade. Coverage needs its own cold build of tfhe — a
-second one, because `cargo-llvm-cov` builds into a different target directory
-with `RUSTC_WRAPPER` set and can share nothing with the test job — and on this
-repo's 2-vCPU runner that is hours of billable time on every push, to produce
-numbers you can produce here in about a minute warm. What it costs is
-enforcement: the floors hold on the machine of whoever is pushing, and a push
-made with `--no-verify` is not checked at all. If that stops being an
-acceptable trade, the job to restore is a `push:`-on-`main` one — per merge
-rather than per PR push.
+Not on PR pushes, because `cargo-llvm-cov` builds into a different target
+directory with `RUSTC_WRAPPER` set and so shares nothing with the test job —
+it pays for the whole dependency graph a second time, roughly doubling what a
+push costs, to produce numbers you saw locally a minute earlier. But on `main`,
+because the local hook is skippable with `--no-verify` and the merge commit is
+the last place to catch a floor that a laptop quietly failed to enforce.
 
 `--open` instead of `--check` writes and opens the browsable HTML report.
 
