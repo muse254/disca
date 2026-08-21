@@ -27,6 +27,7 @@
 //! processes once job submission moves on-chain in Track 3. Everything the key
 //! holder does here is confined to [`KeyHolder`] so the seam is visible.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -408,19 +409,32 @@ fn serve(
 
                         transport::respond(request, 200, b"ok");
 
-                        // One attester, one attestation. A repeat overwrites
-                        // rather than accumulating, so a worker cannot inflate
-                        // its own weight by reporting twice — and since the key
-                        // is the recovered address, "the same worker" is not
-                        // something the sender gets a say in.
-                        let mut inbox = inbox.lock().expect("inbox poisoned");
-                        if inbox.insert(attester, report).is_some() {
+                        // One attester, one attestation, and the *first* one
+                        // counts. Keying by the recovered address already stops
+                        // a party voting twice; keeping the first also stops a
+                        // later message displacing a vote already cast, which
+                        // matters because `/results` accepts a report from any
+                        // registered address and an attestation is not a secret.
+                        //
+                        // A second attestation over a different result is
+                        // signed evidence that one signer said two things about
+                        // one job, and with unique job ids the right response
+                        // would be to discard that signer's vote entirely.
+                        // `submitJob` does not assign them yet, so `job_id` is
+                        // the constant 1 and a replayed attestation from an
+                        // earlier run is indistinguishable from equivocation.
+                        // Dropping the vote would turn a replay anyone can
+                        // mount into a denial of quorum. Keep the first, say so
+                        // loudly, and revisit when job ids are real.
+                        if let Recorded::AlreadyVoted { conflicting } =
+                            record(&inbox, attester, report)
+                        {
                             warn!(
                                 attester = %attest::hex_address(&attester),
-                                "attester reported more than once"
+                                conflicting,
+                                "attester reported more than once; keeping the first"
                             );
                         }
-                        drop(inbox);
 
                         let _ = wake.send(());
                     }
@@ -523,8 +537,61 @@ fn agreement_still_possible(inbox: &Inbox, required: usize, dispatched: usize) -
         .map(|(_, attesters)| attesters.len())
         .max()
         .unwrap_or(0);
-    let outstanding = dispatched.saturating_sub(reported(inbox));
-    best + outstanding >= required
+
+    // `reported` counts attesters, and an attester is anyone the registry
+    // accepts — not necessarily one of the workers this job was dispatched to.
+    // Once the registry is larger than the dispatch set, which is the on-chain
+    // shape (a global registry, a job sent to a subset of it), more parties can
+    // report than were dispatched to and `dispatched - reported` stops meaning
+    // "workers that might still answer". Saturating it to zero would call a job
+    // dead while a dispatched worker was still evaluating, so when the count is
+    // not authoritative, keep waiting and let the deadline decide. Early exit
+    // is an optimisation; being wrong about it costs a correct result.
+    let reported = reported(inbox);
+    if reported > dispatched {
+        return true;
+    }
+
+    best + (dispatched - reported) >= required
+}
+
+/// What happened to a report the verifier already accepted.
+#[derive(Debug, PartialEq, Eq)]
+enum Recorded {
+    /// First attestation from this address; it is the vote.
+    Counted,
+    /// This address had already voted. `conflicting` distinguishes a duplicate
+    /// from one signer saying two different things about one job.
+    AlreadyVoted { conflicting: bool },
+}
+
+/// Files an attested report under the address that signed it, first one wins.
+///
+/// Split out of `serve` because this is where a vote is decided, and a decision
+/// worth making is a decision worth testing without standing up a socket.
+fn record(inbox: &Inbox, attester: Address, report: JobReport) -> Recorded {
+    let mut inbox = inbox.lock().expect("inbox poisoned");
+    match inbox.entry(attester) {
+        Entry::Vacant(slot) => {
+            slot.insert(report);
+            Recorded::Counted
+        }
+        Entry::Occupied(held) => Recorded::AlreadyVoted {
+            conflicting: outcome_key(&held.get().outcome) != outcome_key(&report.outcome),
+        },
+    }
+}
+
+/// What two reports have to share to be the same answer.
+///
+/// Only used to say whether a repeat attestation contradicts the one already
+/// held, so failures compare by reason: two workers that both gave up for the
+/// same stated reason said the same thing.
+fn outcome_key(outcome: &JobOutcome) -> [u8; 32] {
+    match outcome {
+        JobOutcome::Evaluated(sealed) => sealed.hash,
+        JobOutcome::Failed(reason) => wire::commitment(reason.as_bytes()),
+    }
 }
 
 /// Groups reports by attestation hash and returns the first group to reach
@@ -948,6 +1015,57 @@ mod tests {
             group(&inbox).len(),
             1,
             "only the evaluated report forms a group"
+        );
+    }
+
+    #[test]
+    fn a_repeat_attestation_does_not_displace_the_vote_already_cast() {
+        // `/results` takes a report from any registered address, and an
+        // attestation is not secret, so "arrived later" must not mean "wins".
+        // Last-write-wins would let a replayed attestation from an earlier run
+        // overwrite the vote a worker actually cast for this job.
+        let (address, first) = evaluated("w1", 0xaa);
+        let (_, contradiction) = evaluated("w1", 0xbb);
+        let (_, repeat) = evaluated("w1", 0xaa);
+        let inbox = inbox(vec![]);
+
+        assert_eq!(record(&inbox, address, first), Recorded::Counted);
+        assert_eq!(
+            record(&inbox, address, contradiction),
+            Recorded::AlreadyVoted { conflicting: true },
+            "a second, different answer from one signer is a contradiction"
+        );
+        assert_eq!(
+            record(&inbox, address, repeat),
+            Recorded::AlreadyVoted { conflicting: false },
+            "the same answer twice is a duplicate, not a contradiction"
+        );
+
+        let groups = group(&inbox);
+        assert_eq!(groups.len(), 1, "neither later report forms a group");
+        assert!(
+            groups.contains_key(&sealed(0xaa).hash),
+            "the first attestation is the one that counts"
+        );
+    }
+
+    #[test]
+    fn a_job_stays_open_when_more_parties_report_than_were_dispatched_to() {
+        // The registry is global and a job goes to a subset of it, so a
+        // registered worker that was not dispatched to can still report. When
+        // that happens the coordinator cannot tell which inbox entries came
+        // from workers it is waiting on, and must not conclude the job is dead:
+        // here two of three dispatched workers disagree, a fourth party has
+        // also reported, and the third dispatched worker is still evaluating.
+        let crowded = inbox(vec![
+            evaluated("w1", 0xaa),
+            evaluated("w2", 0xbb),
+            evaluated("w4", 0xcc),
+        ]);
+        assert_eq!(reported(&crowded), 3);
+        assert!(
+            agreement_still_possible(&crowded, 2, 2),
+            "an outstanding dispatched worker could still form a quorum"
         );
     }
 
