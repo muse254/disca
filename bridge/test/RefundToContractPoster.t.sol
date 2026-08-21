@@ -54,36 +54,50 @@ contract RefundToContractPosterTest is BridgeHarness {
 
     /// @dev The finding, stated as an assertion so that fixing it is a visible
     /// change rather than a quiet one.
-    function test_aTallyWithEscrowCanNeverBeRefunded() public {
+    function test_aTallyWithEscrowIsRefundedAndTheCommitteeCanRecoverIt() public {
+        // This test was written the other way up. It asserted that the escrow
+        // was stuck: `startTally` posts the job, so `job.poster` is the tally
+        // contract, `refundOnTimeout` pays the poster with a bare `call`, and a
+        // contract with no `receive` cannot accept it. The bridge reverted —
+        // correctly, since releasing a job's escrow into nothing is worse — and
+        // by then the deadline had passed, so `fulfillJob` refused too. Both
+        // exits closed, against a `bridge.md` §6 that promises a refund.
+        //
+        // `CommitteeTally` now has `receive` and a committee-gated `withdraw`.
+        // `receive` alone would have moved the problem rather than fixed it:
+        // the refund would land here and stay.
         uint256 jobId = _startTally(1 ether);
         vm.warp(bridge.jobs(jobId).deadline + 1);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                DiscaBridge.EscrowTransferFailed.selector, address(tally), 1 ether
-            )
-        );
         bridge.refundOnTimeout(jobId);
 
-        // Still Open, and permanently so: the deadline has passed, so the only
-        // other exit is closed too.
         assertEq(
             uint256(bridge.jobs(jobId).state),
-            uint256(IDiscaBridge.JobState.Open),
-            "the job should not have changed state"
+            uint256(IDiscaBridge.JobState.Refunded),
+            "the job should be refunded"
         );
-        assertEq(bridge.jobs(jobId).escrow, 1 ether, "the escrow is still held by the bridge");
-        assertEq(address(bridge).balance, 1 ether, "and the ether is still in the bridge");
+        assertEq(address(bridge).balance, 0, "the bridge should not still hold it");
+        assertEq(address(tally).balance, 1 ether, "the poster got it back");
 
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                DiscaBridge.JobExpired.selector, jobId, bridge.jobs(jobId).deadline
-            )
-        );
-        vm.prank(coordinator);
-        bridge.fulfillJob(
-            jobId, keccak256("anything"), "anything", new IDiscaBridge.Attestation[](0)
-        );
+        // ...and it can leave again, which is the half `receive` does not give.
+        address payable elsewhere = payable(address(0xBEEF));
+        vm.prank(committee);
+        tally.withdraw(elsewhere);
+
+        assertEq(address(tally).balance, 0, "the tally should not hoard it");
+        assertEq(elsewhere.balance, 1 ether, "the committee recovered the escrow");
+    }
+
+    function test_onlyTheCommitteeCanWithdraw() public {
+        uint256 jobId = _startTally(1 ether);
+        vm.warp(bridge.jobs(jobId).deadline + 1);
+        bridge.refundOnTimeout(jobId);
+
+        vm.expectRevert(CommitteeTally.NotCommittee.selector);
+        vm.prank(address(0xBAD));
+        tally.withdraw(payable(address(0xBAD)));
+
+        assertEq(address(tally).balance, 1 ether, "a stranger moves nothing");
     }
 
     /// @dev The other half, and the reason the failure above has stayed

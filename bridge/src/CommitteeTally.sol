@@ -48,6 +48,9 @@ contract CommitteeTally is IDiscaConsumer {
     /// @notice The bridge reported a settled result.
     event TallySettled(uint256 indexed jobId, bytes32 resultCommit);
 
+    /// @notice A refunded escrow left the contract.
+    event EscrowWithdrawn(address indexed to, uint256 amount);
+
     /// @notice The committee published the plaintext winner.
     /// @dev Trusted. See the contract-level note.
     event TallyRevealed(uint256 indexed jobId, uint32 winner);
@@ -58,6 +61,7 @@ contract CommitteeTally is IDiscaConsumer {
     error TallyInFlight(uint256 jobId);
     error NoResultYet();
     error AlreadyRevealed();
+    error WithdrawFailed();
 
     /// @param bridge_ The `DiscaBridge` deployment.
     /// @param committee_ The key holder, allowed to start a tally and to reveal.
@@ -125,5 +129,36 @@ contract CommitteeTally is IDiscaConsumer {
         winner = winner_;
         revealed = true;
         emit TallyRevealed(jobId, winner_);
+    }
+
+    /// @notice Accepts a refunded escrow back from the bridge.
+    /// @dev Without this the escrow is stuck forever, and the bug is quiet
+    /// enough to be worth spelling out. `startTally` posts the job, so
+    /// `job.poster` is this contract. `refundOnTimeout` pays the poster with a
+    /// bare `call`, which fails against a contract that cannot receive value —
+    /// and the bridge reverts rather than swallowing it, correctly, since
+    /// releasing a job's escrow into nothing would be worse. But the job is
+    /// past its deadline by then, so `fulfillJob` refuses too. Both exits are
+    /// closed and `bridge.md` §6 promises a refund for exactly this case.
+    ///
+    /// `CommitteeTally.t.sol` did not catch it because every refund path there
+    /// is zero-value or posted by an EOA; `RefundToContractPoster.t.sol` pins
+    /// it, with an EOA control so a failure cannot be misread as
+    /// `refundOnTimeout` being broken.
+    receive() external payable {}
+
+    /// @notice The committee withdraws a refunded escrow.
+    /// @param to Where to send it.
+    /// @dev `receive` alone would move the problem rather than fix it: the
+    /// refund would land here and stay, which is stuck in a nicer place. Gated
+    /// on the committee because they funded the job in the first place.
+    function withdraw(address payable to) external {
+        if (msg.sender != committee) revert NotCommittee();
+
+        uint256 amount = address(this).balance;
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert WithdrawFailed();
+
+        emit EscrowWithdrawn(to, amount);
     }
 }
