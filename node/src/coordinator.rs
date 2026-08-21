@@ -228,12 +228,23 @@ impl Verifier {
 }
 
 pub fn run(config: Config) -> Result<(), String> {
-    if config.attesters == 0 || config.attesters > config.workers.len() {
-        return Err(format!(
-            "--attesters {} is impossible with {} worker(s)",
-            config.attesters,
-            config.workers.len()
-        ));
+    // A quorum has to be a majority of the workers dispatched to, and refusing
+    // anything less is not caution — a minority quorum can settle on a wrong
+    // answer with nothing left to contradict it.
+    //
+    // The TLA+ model exhibits it (`spec/`, `MC_GraceRace_N4M2`): with N = 4 and
+    // M = 2, the two faulty workers report, `STRAGGLER_GRACE` expires while the
+    // honest two are still evaluating — FHE is seconds of work and the grace is
+    // five — and `tally` sees exactly one group at quorum and settles on it.
+    // The split refusal never fires, because at that moment there is no split
+    // to see. A longer grace does not help: a faulty worker need not evaluate
+    // at all, so it can always report first.
+    //
+    // `2M > N` makes two disjoint quorums impossible, so the honest workers can
+    // always outvote a faulty group unless they are outnumbered — which is the
+    // fault threshold being exceeded, not a race being lost.
+    if let Some(error) = quorum_error(config.attesters, config.workers.len()) {
+        return Err(error);
     }
 
     // A quorum can only ever be formed by registered addresses, so a registry
@@ -254,7 +265,7 @@ pub fn run(config: Config) -> Result<(), String> {
     // both use job 1 today, and their attestations are interchangeable. That
     // becomes sound, not merely conventional, when `submitJob` assigns the id
     // (`bridge.md` §2, task 2.9f).
-    let job_id = 1;
+    let job_id = fresh_job_id();
 
     let (key_holder, server_key_bytes, server_key_hash) = KeyHolder::new();
     let bytecode_blob = compile(&config.program, &config.function)?;
@@ -336,6 +347,79 @@ pub fn run(config: Config) -> Result<(), String> {
 
 /// Compiles a WASM module to bytecode, checking up front that the function the
 /// job names exists and is runnable.
+/// A job id that no earlier run of this binary has used.
+///
+/// The signed digest binds the job id (`primitives::attest`), so this is what
+/// stops an attestation being lifted from one job onto another. While the id
+/// was the constant 1 it stopped nothing: two runs over the same program and
+/// inputs produced byte-identical claims, so attestations were interchangeable
+/// across runs — and `/results` accepts a report from any registered address.
+///
+/// The TLA+ model shows what that costs (`spec/`, `MC_ReplayPreempt_N3M2`). A
+/// relayer holding attestations from an earlier run does not have to win a race
+/// to *displace* a vote, because first-write-wins only protects a vote already
+/// cast. It only has to arrive before the workers do, and FHE evaluation is
+/// seconds. Every inbox slot fills with replayed attestations, nothing is
+/// displaced, and the job settles on an old answer with three honest workers
+/// and no faults.
+///
+/// Wall-clock nanoseconds rather than a counter, because a counter restarts
+/// with the process — which is exactly the failure being fixed. The bound is
+/// honest: this makes ids unique *per coordinator*, which is all that is needed
+/// while the coordinator is the only party assigning them. It is not global
+/// uniqueness and it commits to nothing — two coordinators can still collide,
+/// and neither can show a contract that its id was ever issued. `submitJob`
+/// assigning the id on-chain is what makes this sound rather than merely
+/// unlikely (`bridge.md` §2, task 2.9f).
+/// Whether `attesters`-of-`workers` is a quorum this coordinator will run.
+///
+/// Split out so the rule can be tested at its boundary without binding sockets
+/// or generating a keypair; `run` calls it before doing either.
+fn quorum_error(attesters: usize, workers: usize) -> Option<String> {
+    if attesters == 0 || attesters > workers {
+        return Some(format!(
+            "--attesters {attesters} is impossible with {workers} worker(s)"
+        ));
+    }
+
+    if attesters * 2 <= workers {
+        return Some(format!(
+            "--attesters {attesters} is not a majority of {workers} worker(s); a \
+             minority quorum can settle before the rest report (see spec/, \
+             MC_GraceRace_N4M2)"
+        ));
+    }
+
+    None
+}
+
+fn fresh_job_id() -> u64 {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Two parts, because neither is sufficient alone. The clock separates this
+    // process from earlier ones; the counter separates jobs within it.
+    //
+    // The counter is not belt and braces. A wall clock read twice in quick
+    // succession can return the same value — `two_runs_do_not_share_a_job_id`
+    // failed on exactly that when this function was the timestamp alone, which
+    // is the whole reason the test reads it twice rather than once.
+    static BASE: OnceLock<u64> = OnceLock::new();
+    static ISSUED: AtomicU64 = AtomicU64::new(0);
+
+    let base = *BASE.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            // A clock before the epoch is not a reason to run a job under an id
+            // some earlier run may also have used.
+            .expect("system clock is before the unix epoch")
+            .as_nanos() as u64
+    });
+
+    base.wrapping_add(ISSUED.fetch_add(1, Ordering::Relaxed))
+}
+
 fn compile(path: &str, function: &str) -> Result<Vec<u8>, String> {
     let wasm = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let parsed = Program::from_wasm(&wasm).map_err(|e| e.to_string())?;
@@ -977,6 +1061,43 @@ mod tests {
 
         let error = parse_registry(&["0xnot-an-address".into()]).unwrap_err();
         assert!(error.contains("20-byte hex address"), "got: {error}");
+    }
+
+    #[test]
+    fn a_minority_quorum_is_refused_before_the_job_starts() {
+        // 2-of-4 is the shape the TLA+ model settles wrongly
+        // (`spec/`, `MC_GraceRace_N4M2`): two faulty workers report, the
+        // straggler grace expires while the honest two are still evaluating,
+        // and `tally` sees one group at quorum with no split to refuse.
+        //
+        // Checked at startup rather than at settlement because by settlement
+        // there is nothing left to notice — the wrong answer looks exactly like
+        // the right one, and `attestation.md` §1 says the key holder cannot
+        // tell them apart either.
+        let error = quorum_error(2, 4).expect("2-of-4 must be refused");
+        assert!(
+            error.contains("majority"),
+            "the refusal must say why: {error}"
+        );
+
+        // The demo's own shape, and the boundary either side of it.
+        assert!(quorum_error(2, 3).is_none(), "2-of-3 is a majority");
+        assert!(quorum_error(3, 4).is_none(), "3-of-4 is a majority");
+        assert!(quorum_error(2, 5).is_some(), "2-of-5 is not");
+        assert!(quorum_error(3, 5).is_none(), "3-of-5 is");
+    }
+
+    #[test]
+    fn two_runs_do_not_share_a_job_id() {
+        // The signed digest binds the job id, so equal ids across runs make
+        // attestations interchangeable between them — which is what lets a
+        // relayer settle this job with an earlier job's signatures
+        // (`spec/`, `MC_ReplayPreempt_N3M2`). Nanosecond wall clock, so this is
+        // about the id not being a constant rather than about entropy.
+        let first = fresh_job_id();
+        let second = fresh_job_id();
+        assert_ne!(first, second, "a fresh id per job, not a fixed one");
+        assert_ne!(first, 1, "and specifically not the old constant");
     }
 
     #[test]
