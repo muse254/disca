@@ -13,11 +13,6 @@
 # `models` is not documentation. It is the question `--update` asks you: if you
 # cannot say what the item corresponds to in the spec, you are not in a position
 # to accept its new hash.
-#
-# Not listed yet: `quorum_error` and `fresh_job_id`, the two fixes PR #18 makes
-# for the MC_GraceRace_N4M2 and MC_ReplayPreempt_N3M2 counterexamples. They do
-# not exist on this branch, and an entry for an item that is not there fails
-# `--check` as GONE — correctly, but for the wrong reason. Add them with the fix.
 
 [[item]]
 file = "node/src/coordinator.rs"
@@ -42,6 +37,23 @@ file = "node/src/coordinator.rs"
 item = "fn tally("
 models = "Quorums and RefuseOnSplit; NoSettleOnSplit depends on it"
 sha256 = "27acde7751d50aae310cce36ab542b56397db95e481ba42cd53300b7838007b4"
+
+# The two fixes the model's counterexamples produced. Listed here for the same
+# reason as everything above, and with a sharper edge: these exist *because* of
+# a trace, so if either is weakened the counterexample it answers comes back and
+# the spec would still report all configurations as expected.
+
+[[item]]
+file = "node/src/coordinator.rs"
+item = "fn quorum_error("
+models = "2M > N — the fix for MC_GraceRace_N4M2, where a minority quorum settles during the straggler grace"
+sha256 = "9ba8134304fe42df787d79a23779a27872f607c7a8506eb363f6ccf78e8e3fea"
+
+[[item]]
+file = "node/src/coordinator.rs"
+item = "fn fresh_job_id("
+models = "UniqueJobIds — the fix for MC_ReplayPreempt_N3M2, where replayed attestations pre-empt every honest worker"
+sha256 = "412dfd4dc0d48c53b36c52fe88826f79106d62072d6c9e7961818ebd3258258c"
 
 [[item]]
 file = "node/src/coordinator.rs"
