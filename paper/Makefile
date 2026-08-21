@@ -1,4 +1,4 @@
-# Makefile for LaTeX white paper
+# Makefile for the LaTeX research paper
 
 TARGET = main
 

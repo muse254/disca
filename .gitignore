@@ -3,17 +3,17 @@
 # OS artifacts
 .DS_Store
 
-# LaTeX build artifacts (see whitepaper/Makefile)
-whitepaper/*.aux
-whitepaper/*.log
-whitepaper/*.out
-whitepaper/*.toc
-whitepaper/*.lof
-whitepaper/*.lot
-whitepaper/*.bbl
-whitepaper/*.blg
-whitepaper/*.synctex.gz
-whitepaper/*.pdf
+# LaTeX build artifacts (see paper/Makefile)
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.lof
+paper/*.lot
+paper/*.bbl
+paper/*.blg
+paper/*.synctex.gz
+paper/*.pdf
 
 # Python bytecode from scripts/lib
 __pycache__/
