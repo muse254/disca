@@ -12,6 +12,7 @@
 //! `jobId` once the bridge exists (Track 3); everything correlates on this
 //! field so that swap touches one place.
 
+use primitives::attest::Attestation;
 use primitives::wire::SealedResult;
 use wincode::config::DefaultConfig;
 use wincode::{SchemaRead, SchemaWrite};
@@ -33,21 +34,11 @@ pub struct InputBlob {
 #[derive(Debug, Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct JobDispatch {
     pub job_id: u64,
-    /// Authorises exactly one attestation, and identifies which dispatch it
-    /// answers.
-    ///
-    /// The coordinator mints a fresh unguessable token per (job, worker) and
-    /// only the worker it dispatched to ever sees it. A worker echoes its token
-    /// back in [`JobReport`], which is what lets the coordinator attribute a
-    /// report to the worker it actually sent the job to instead of trusting a
-    /// self-declared name. Without this, one worker can report M times under M
-    /// invented identities and settle a job single-handedly.
-    ///
-    /// This binds a report to a dispatch; it does not make a worker
-    /// unimpersonable to someone who has seen its token. Real Sybil resistance
-    /// needs per-worker signing keys — see `architecture.md` §11 Q3.
-    pub attestation_token: [u8; 32],
     /// DISCA bytecode. The worker validates it before evaluating anything.
+    ///
+    /// Also the program's identity: both sides take `keccak256` of these bytes
+    /// and bind it into the signed attestation (`primitives::attest::Claim`),
+    /// so neither has to be told what program it is running.
     pub bytecode: Vec<u8>,
     /// Which exported function of that program to run.
     pub function: String,
@@ -71,12 +62,27 @@ pub enum JobOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct JobReport {
     pub job_id: u64,
-    /// The token from the dispatch being answered. The coordinator resolves
-    /// this to the worker it dispatched to; a report carrying an unknown or
-    /// already-spent token is not counted.
-    pub attestation_token: [u8; 32],
+    /// The worker's signature over the claim its `outcome` amounts to (task
+    /// 2.10i).
+    ///
+    /// This is the whole of the report's authority. Everything else in the
+    /// message is either covered by the signature or is decoration: the
+    /// coordinator reconstructs the claim from what it already knows (the job
+    /// id it dispatched, the hash of the bytecode it compiled) plus the outcome
+    /// carried here, recovers the signing address, and counts agreement over
+    /// distinct *registered* addresses. Nothing a sender puts in this message
+    /// can change which address comes out.
+    ///
+    /// This replaces the per-(job, worker) attestation token of task 2.9a. The
+    /// token was a bearer secret standing in for exactly this signing key
+    /// (`architecture.md` §11 Q3 said so at the time), and it could not travel
+    /// past the coordinator: a contract has no way to check a secret the
+    /// coordinator minted. Keeping both would leave two attribution mechanisms
+    /// that can disagree, and an attacker attacks the weaker one.
+    pub attestation: Attestation,
     /// What the worker calls itself. Useful in logs, and nothing more — it is
-    /// self-declared, so it must never be what agreement is counted by.
+    /// self-declared, so it must never be what agreement is counted by. The
+    /// address recovered from `attestation` is the identity that counts.
     pub worker: String,
     pub outcome: JobOutcome,
     /// Evaluation wall-clock, so the coordinator can see which worker is slow
@@ -102,12 +108,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use primitives::attest::{Claim, WorkerKey};
+
     use super::*;
 
     fn dispatch() -> JobDispatch {
         JobDispatch {
             job_id: 42,
-            attestation_token: [11u8; 32],
             bytecode: vec![1, 2, 3, 4],
             function: "tally4_select".into(),
             inputs: vec![InputBlob {
@@ -126,14 +133,20 @@ mod tests {
 
     #[test]
     fn a_successful_report_round_trips() {
+        let sealed = SealedResult {
+            blob: vec![5; 128],
+            hash: [1u8; 32],
+        };
+        let key = WorkerKey::derive("worker-1");
         let report = JobReport {
             job_id: 42,
-            attestation_token: [11u8; 32],
-            worker: "worker-1".into(),
-            outcome: JobOutcome::Evaluated(SealedResult {
-                blob: vec![5; 128],
-                hash: [1u8; 32],
+            attestation: key.attest(&Claim::Result {
+                job_id: 42,
+                bytecode_hash: [9u8; 32],
+                result_hash: sealed.hash,
             }),
+            worker: "worker-1".into(),
+            outcome: JobOutcome::Evaluated(sealed),
             elapsed_ms: 1234,
         };
 
@@ -142,10 +155,47 @@ mod tests {
     }
 
     #[test]
+    fn a_report_survives_the_wire_still_recovering_to_its_signer() {
+        // Equality after a round trip is not quite the property that matters:
+        // the signature has to still recover to the same address on the far
+        // side, because that is the only thing the coordinator counts. A
+        // field-order or endianness change in the codec would pass the equality
+        // check above (both sides use the same codec) and break this one.
+        let key = WorkerKey::derive("worker-1");
+        let claim = Claim::Result {
+            job_id: 42,
+            bytecode_hash: [9u8; 32],
+            result_hash: [1u8; 32],
+        };
+
+        let report = JobReport {
+            job_id: 42,
+            attestation: key.attest(&claim),
+            worker: "worker-1".into(),
+            outcome: JobOutcome::Evaluated(SealedResult {
+                blob: vec![5; 128],
+                hash: [1u8; 32],
+            }),
+            elapsed_ms: 1234,
+        };
+
+        let decoded: JobReport = decode(&encode(&report).unwrap()).unwrap();
+        assert_eq!(
+            primitives::attest::recover(&claim, &decoded.attestation).unwrap(),
+            key.address()
+        );
+    }
+
+    #[test]
     fn a_failure_report_round_trips() {
+        let key = WorkerKey::derive("worker-2");
         let report = JobReport {
             job_id: 7,
-            attestation_token: [12u8; 32],
+            attestation: key.attest(&Claim::Failure {
+                job_id: 7,
+                bytecode_hash: [9u8; 32],
+                reason_hash: [4u8; 32],
+            }),
             worker: "worker-2".into(),
             outcome: JobOutcome::Failed("stack underflow at op 3".into()),
             elapsed_ms: 12,

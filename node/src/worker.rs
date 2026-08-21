@@ -8,6 +8,12 @@
 //! decompressed, so cloning it per job would dominate the cost of the job
 //! itself. Serial evaluation is also honest about what a worker is: one
 //! machine's worth of CPU.
+//!
+//! A worker also holds a secp256k1 key and signs every report with it (task
+//! 2.10i). That key is the worker's identity — the Ethereum address it would be
+//! registered under on-chain — and it is the only thing that distinguishes this
+//! worker's attestation from anyone else's. It is never logged, never sent, and
+//! never derived from anything the coordinator supplies.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,6 +21,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::Instant;
 
+use primitives::attest::{self, Claim, WorkerKey};
 use primitives::bytecode;
 use primitives::wire;
 use tfhe::set_server_key;
@@ -61,7 +68,38 @@ pub struct Config {
     pub bind: String,
     pub coordinator: String,
     pub id: String,
+    /// The key this worker attests with. See [`resolve_key`].
+    pub key: WorkerKey,
     pub behaviour: Behaviour,
+}
+
+/// Picks the signing key a worker will run with: the one it was given, or a
+/// deterministic development key derived from its id.
+///
+/// The fallback exists so `scripts/run-local.sh` can start three workers and a
+/// coordinator that already knows their addresses without a key-distribution
+/// step in a shell script. It is not a secret — the id is in every log line, so
+/// anyone can recompute it — and a worker using it says so at startup. A
+/// deployment passes `--key`.
+///
+/// Note what this function does *not* do: it never falls back silently on a bad
+/// `--key`. An operator who meant to supply a key and typo'd it must not end up
+/// attesting under a publicly-derivable address that happens to be registered
+/// on someone's testnet.
+pub fn resolve_key(key: Option<&str>, id: &str) -> Result<WorkerKey, String> {
+    match key {
+        Some(hex) => WorkerKey::from_hex(hex).map_err(|e| e.to_string()),
+        None => {
+            let key = WorkerKey::derive(id);
+            warn!(
+                worker = %id,
+                address = %attest::hex_address(&key.address()),
+                "no --key given; attesting under a key derived from the worker id, \
+                 which anyone can recompute. Fine locally, never in a deployment"
+            );
+            Ok(key)
+        }
+    }
 }
 
 /// Runs the worker until the process is killed.
@@ -77,6 +115,12 @@ pub fn run(config: Config) -> Result<(), String> {
         worker = %config.id,
         bind = %config.bind,
         coordinator = %config.coordinator,
+        // The address, never the key. This is the value an operator registers
+        // on-chain and the value the coordinator's registry has to contain, so
+        // it is worth one line at startup: a worker whose attestations are all
+        // being rejected is otherwise indistinguishable from one nobody is
+        // dispatching to.
+        address = %attest::hex_address(&config.key.address()),
         behaviour = ?config.behaviour,
         "worker listening"
     );
@@ -94,7 +138,12 @@ pub fn run(config: Config) -> Result<(), String> {
     // unbounded allocation an attacker controls.
     let queued = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = channel::<JobDispatch>();
-    let evaluator = spawn_evaluator(&config, rx, queued.clone());
+
+    // The signing key moves to the evaluator thread and stays there: it is used
+    // at exactly one point, sealing a report, and the fewer places hold it the
+    // fewer there are to leak it. The accept loop keeps only the id it logs.
+    let id = config.id.clone();
+    let evaluator = spawn_evaluator(config, rx, queued.clone());
 
     for mut request in server.incoming_requests() {
         // Accept and acknowledge immediately. Evaluation takes seconds, and a
@@ -108,7 +157,7 @@ pub fn run(config: Config) -> Result<(), String> {
                         continue;
                     }
 
-                    info!(job_id = dispatch.job_id, worker = %config.id, "job accepted");
+                    info!(job_id = dispatch.job_id, worker = %id, "job accepted");
                     queued.fetch_add(1, Ordering::AcqRel);
                     let _ = tx.send(dispatch);
                     transport::respond(request, 202, b"accepted");
@@ -136,13 +185,17 @@ pub fn run(config: Config) -> Result<(), String> {
 const MAX_QUEUED_JOBS: usize = 16;
 
 fn spawn_evaluator(
-    config: &Config,
+    config: Config,
     rx: Receiver<JobDispatch>,
     queued: Arc<AtomicUsize>,
 ) -> thread::JoinHandle<()> {
-    let id = config.id.clone();
-    let coordinator = config.coordinator.clone();
-    let behaviour = config.behaviour;
+    let Config {
+        id,
+        coordinator,
+        key,
+        behaviour,
+        ..
+    } = config;
 
     thread::spawn(move || {
         // The key is fetched on first need and kept for the process lifetime;
@@ -155,12 +208,20 @@ fn spawn_evaluator(
             let span = info_span!("job", job_id = dispatch.job_id, worker = %id);
             let _enter = span.enter();
 
+            // Both sides derive the program's identity from the bytecode they
+            // hold rather than being told it, so a coordinator cannot get a
+            // worker to sign an attestation naming a program it did not run.
+            let bytecode_hash = bytecode::hash_bytecode(&dispatch.bytecode);
+
             if installed != Some(dispatch.server_key_hash) {
                 match install_server_key(&coordinator, &dispatch.server_key_hash) {
                     Ok(()) => installed = Some(dispatch.server_key_hash),
                     Err(error) => {
                         error!(%error, "cannot obtain server key");
-                        report(&coordinator, failure(&dispatch, &id, error, 0));
+                        report(
+                            &coordinator,
+                            failure(&dispatch, bytecode_hash, &key, &id, error, 0),
+                        );
                         continue;
                     }
                 }
@@ -175,11 +236,22 @@ fn spawn_evaluator(
                         result_hash = %bytecode::hex(&sealed.hash),
                         "job evaluated"
                     );
+
+                    // Signed *after* sealing and over the sealed hash, so what
+                    // is attested to is exactly the bytes that go on-chain
+                    // (`bridge.md` §5a). Signing anything earlier would commit
+                    // to a value the contract cannot recompute.
+                    let attestation = key.attest(&Claim::Result {
+                        job_id: dispatch.job_id,
+                        bytecode_hash,
+                        result_hash: sealed.hash,
+                    });
+
                     report(
                         &coordinator,
                         JobReport {
                             job_id: dispatch.job_id,
-                            attestation_token: dispatch.attestation_token,
+                            attestation,
                             worker: id.clone(),
                             outcome: JobOutcome::Evaluated(sealed),
                             elapsed_ms,
@@ -191,17 +263,43 @@ fn spawn_evaluator(
                     // indistinguishable from slowness and stalls the job.
                     warn!(%error, "job failed");
                     let elapsed_ms = started.elapsed().as_millis() as u64;
-                    report(&coordinator, failure(&dispatch, &id, error, elapsed_ms));
+                    report(
+                        &coordinator,
+                        failure(&dispatch, bytecode_hash, &key, &id, error, elapsed_ms),
+                    );
                 }
             }
         }
     })
 }
 
-fn failure(dispatch: &JobDispatch, id: &str, reason: String, elapsed_ms: u64) -> JobReport {
+/// Builds a signed "I could not run this" report.
+///
+/// A failure attests to nothing and is never counted towards a quorum, but it
+/// is signed under its own domain tag all the same: an unsigned failure is
+/// something anyone who can reach the coordinator could forge in an honest
+/// worker's name, and the moment registration or reputation depends on who
+/// failed, that is a way to discredit a working operator for free.
+fn failure(
+    dispatch: &JobDispatch,
+    bytecode_hash: [u8; 32],
+    key: &WorkerKey,
+    id: &str,
+    reason: String,
+    elapsed_ms: u64,
+) -> JobReport {
+    let attestation = key.attest(&Claim::Failure {
+        job_id: dispatch.job_id,
+        bytecode_hash,
+        // The reason is unbounded operator-controlled text; its hash is what
+        // goes in the fixed-width preimage, and the text travels beside it so
+        // the coordinator can still recompute the hash and check the two agree.
+        reason_hash: wire::commitment(reason.as_bytes()),
+    });
+
     JobReport {
         job_id: dispatch.job_id,
-        attestation_token: dispatch.attestation_token,
+        attestation,
         worker: id.to_string(),
         outcome: JobOutcome::Failed(reason),
         elapsed_ms,
@@ -343,7 +441,6 @@ mod tests {
     fn dispatch_with(bytecode: Vec<u8>, function: &str, inputs: Vec<InputBlob>) -> JobDispatch {
         JobDispatch {
             job_id: 1,
-            attestation_token: [0u8; 32],
             bytecode,
             function: function.into(),
             inputs,
@@ -452,5 +549,88 @@ mod tests {
     #[cfg(feature = "fault-injection")]
     fn encrypted(value: i32, client_key: &ClientKey) -> InputBlob {
         committed(wire::encode(&wire::encrypt_input(value, client_key).unwrap()).unwrap())
+    }
+
+    #[test]
+    fn a_worker_without_a_key_falls_back_to_one_derived_from_its_id() {
+        // What scripts/run-local.sh relies on: the coordinator derives the
+        // addresses it will accept from the same ids, in another process.
+        let key = resolve_key(None, "worker-1").unwrap();
+        assert_eq!(
+            key.address(),
+            attest::WorkerKey::derive("worker-1").address()
+        );
+    }
+
+    #[test]
+    fn a_supplied_key_wins_over_the_derived_one() {
+        let hex = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let supplied = resolve_key(Some(hex), "worker-1").unwrap();
+
+        assert_eq!(
+            supplied.address(),
+            WorkerKey::from_hex(hex).unwrap().address()
+        );
+        assert_ne!(
+            supplied.address(),
+            WorkerKey::derive("worker-1").address(),
+            "--key must not be silently ignored"
+        );
+    }
+
+    #[test]
+    fn a_malformed_key_stops_the_worker_rather_than_falling_back() {
+        // The dangerous version of this bug is the quiet one: an operator
+        // typos --key, the worker starts anyway under a publicly-derivable
+        // address, and every attestation it makes is one anybody could have
+        // made. Failing to start is the only safe answer.
+        let error = resolve_key(Some("0xnot-a-key"), "worker-1").unwrap_err();
+        assert!(error.contains("32 hex-encoded bytes"), "got: {error}");
+    }
+
+    #[test]
+    fn a_failure_report_is_signed_under_the_failure_tag_and_names_its_reason() {
+        // Two things at once: the report is attributable to this worker, and
+        // the reason text the coordinator receives is the one whose hash was
+        // signed — otherwise a relay could rewrite the reason and leave the
+        // signature valid.
+        let key = WorkerKey::derive("worker-1");
+        let dispatch = dispatch_with(bytecode_for(MAX), "max", vec![]);
+        let bytecode_hash = bytecode::hash_bytecode(&dispatch.bytecode);
+
+        let report = failure(
+            &dispatch,
+            bytecode_hash,
+            &key,
+            "worker-1",
+            "stack underflow at op 3".into(),
+            7,
+        );
+
+        let JobOutcome::Failed(reason) = &report.outcome else {
+            panic!("expected a failure report");
+        };
+
+        let claim = Claim::Failure {
+            job_id: dispatch.job_id,
+            bytecode_hash,
+            reason_hash: wire::commitment(reason.as_bytes()),
+        };
+        assert_eq!(
+            attest::recover(&claim, &report.attestation).unwrap(),
+            key.address()
+        );
+
+        // ...and it is not a result attestation, however the coordinator
+        // reconstructs the claim.
+        let as_result = Claim::Result {
+            job_id: dispatch.job_id,
+            bytecode_hash,
+            result_hash: wire::commitment(reason.as_bytes()),
+        };
+        assert_ne!(
+            attest::recover(&as_result, &report.attestation).unwrap_or_default(),
+            key.address()
+        );
     }
 }

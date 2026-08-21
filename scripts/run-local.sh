@@ -55,6 +55,23 @@ if [ -z "${HONEST:-}" ]; then
   third_worker_flags+=(--faulty)
 fi
 
+# Each worker signs its attestation with a secp256k1 key (task 2.10i) and the
+# coordinator counts agreement over the addresses it recovers -- but only for
+# addresses in its registry, so it has to be told them up front. None of these
+# workers is given a --key, so each derives one from its --id; `worker-address`
+# computes the same address without starting a worker, which is how the
+# coordinator learns what to accept.
+#
+# RUST_LOG=off because this captures stdout: a stray log line would be
+# substituted into --registered-worker and rejected as a malformed address.
+# Nothing here is a secret -- the ids are public, so the keys are too, which is
+# exactly why a deployment passes --key instead.
+worker_address() { RUST_LOG=off "$NODE" worker-address --id "$1"; }
+registry=()
+for id in worker-1 worker-2 worker-3; do
+  registry+=(--registered-worker "$(worker_address "$id")")
+done
+
 "$NODE" worker --id worker-1 --bind 127.0.0.1:8081 & pids+=($!)
 "$NODE" worker --id worker-2 --bind 127.0.0.1:8082 & pids+=($!)
 "$NODE" worker "${third_worker_flags[@]}" & pids+=($!)
@@ -68,6 +85,7 @@ done
   --worker 127.0.0.1:8081 \
   --worker 127.0.0.1:8082 \
   --worker 127.0.0.1:8083 \
+  "${registry[@]}" \
   --attesters "$ATTESTERS" \
   --program "$PROGRAM" \
   --function "$FUNCTION" \

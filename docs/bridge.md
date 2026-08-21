@@ -24,15 +24,16 @@ recorded there.
 | Input ciphertexts | `CompressedFheInt32` (2.3 KB/value) in calldata/event; `keccak256` commitment in storage | Calldata-viable; on-chain availability proves inputs unchanged |
 | Working ciphertexts (257.9 KB/value, decompressed) | Node memory only | ~4.1M gas/value on-chain; pointless |
 | Result ciphertext | Compressed form **emitted on-chain**; `keccak256` of those same bytes stored as the attestation (see §5a) | Contract can verify blob against hash; key holder fetches and decrypts locally |
-| Escrow, job state, attester set | On-chain | It is the settlement layer |
+| Escrow, job state, attester signatures | On-chain | It is the settlement layer; the signatures are what make the attester set checkable rather than asserted (§2a) |
 
 Gas sketch for a 3-input job (L1 constants; cheaper on L2):
 
 - Input blobs via event data: 3 x 2.3 KB x ~8 gas/byte = ~57k gas
 - Commitments in storage: 3 x 32 B slots = ~60k gas
-- `fulfillJob` (result hash + attester list + compressed result blob **11.8 KB**,
-  paid once as calldata at ~16 gas/byte and once as event data at ~8 gas/byte):
-  order 250-350k gas
+- `fulfillJob` (result hash + attester signatures + compressed result blob
+  **11.8 KB**, paid once as calldata at ~16 gas/byte and once as event data at
+  ~8 gas/byte): order 250-350k gas. The signatures add ~10k of that for a 3-of-N
+  job — 65 bytes and one `ecrecover` (~3k gas) each — which is what §2b is about
 
 The result blob dominates, and it is 5x larger than an input blob: a freshly
 encrypted ciphertext compresses to a replayable PRNG seed, whereas a computed
@@ -70,10 +71,16 @@ interface IDiscaBridge {
     function submitJob(uint256 programId, bytes32[] inputCommits, bytes[] inputBlobs,
                        address callback) external payable returns (uint256 jobId);
 
-    /// Callable by the coordinator once >= attestersRequired workers report the
-    /// same resultHash. Releases escrow, callbacks the consumer.
+    /// One worker's signature over the claim in §2a. `v` is 27 or 28.
+    struct Attestation { bytes32 r; bytes32 s; uint8 v; }
+
+    /// Callable by the coordinator once >= attestersRequired workers have each
+    /// SIGNED for the same resultHash. Releases escrow, callbacks the consumer.
+    ///
+    /// The caller supplies signatures, not addresses: the contract recovers
+    /// each signer itself. See §2a for what it must check.
     function fulfillJob(uint256 jobId, bytes32 resultHash, bytes resultBlob,
-                        address[] attesters) external;
+                        Attestation[] attestations) external;
 
     function refundOnTimeout(uint256 jobId) external;
 
@@ -86,11 +93,12 @@ interface IDiscaBridge {
 
 Design notes:
 
-- **Attestation = registered address list, not ECDSA signatures.** The demo
-  keeps an owner-gated worker registry; `fulfillJob` requires `attesters` to be
-  distinct registered workers, length >= `attestersRequired`. Simpler and
-  cheaper than on-chain signature verification. Signature-based attestation is
-  an L1-ladder upgrade.
+- **Attestation = recovered ECDSA signatures, not a supplied address list.**
+  *Changed by task 2.10i; the original design and why it was wrong are recorded
+  in §2b.* Each worker holds a secp256k1 keypair and signs the claim in §2a.
+  `fulfillJob` recovers a signer per attestation and requires the recovered
+  addresses to be distinct, registered, and at least `attestersRequired` in
+  number. The registry stays owner-gated in the demo.
 - **The contract never verifies computation cryptography.** It verifies that M
   of N registered workers agreed on `keccak256(resultCiphertext)`. Because FHE
   evaluation is byte-reproducible *under the conditions in `architecture.md`
@@ -119,6 +127,105 @@ Design notes:
   `ecrecover` each attestation (task 2.10i); the cost is roughly 3.5k gas per
   attester against a 250-350k transaction, which reverses the reasoning in
   architecture.md §11 Q3.
+
+## 2a. What a worker signs, and what the contract must check
+
+Implemented in `primitives/src/attest.rs` (task 2.10i). The coordinator performs
+exactly the same recovery off-chain before it settles, so a coordinator that
+submits a bad attester set produces a transaction that reverts rather than a
+claim nothing can check.
+
+**A worker is an Ethereum address.** The last 20 bytes of `keccak256` over the
+uncompressed public key, exactly as an EOA is, so `registerWorker(address)`
+needs no mapping table and an operator can hold the key in any Ethereum wallet.
+
+**The signed claim.** Signing a bare `resultHash` would let a signature be
+lifted from one job onto another that produced the same bytes — with a
+deterministic evaluator over a small result space, not a remote coincidence.
+The preimage is fixed-width throughout, so concatenation is injective and no
+length prefixes are needed:
+
+```text
+offset  len  field
+     0   22  "DISCA/attest/result/v1"   ASCII domain tag, no length prefix
+    22    8  jobId                      big-endian uint64
+    30   32  bytecodeHash               keccak256(DISCA bytecode)
+    62   32  resultHash                 keccak256(compressed result), i.e. §5a
+    94       total
+```
+
+```solidity
+bytes32 inner = keccak256(abi.encodePacked(
+    "DISCA/attest/result/v1", uint64(jobId), bytecodeHash, resultHash));
+bytes32 digest = MessageHashUtils.toEthSignedMessageHash(inner);   // EIP-191
+address signer = ecrecover(digest, a.v, a.r, a.s);
+```
+
+`abi.encodePacked` writes a string literal without a length prefix and a
+`uint64` as 8 big-endian bytes, which is why the layout above is reproducible
+on-chain in one line.
+
+**EIP-191, not EIP-712.** The `0x19` prefix means an attestation is structurally
+not an RLP-encoded transaction, so a worker key signing attestations cannot be
+tricked into signing a transfer; it also lets an operator keep the key behind a
+`personal_sign` interface (wallet, HSM, KMS) rather than one that signs raw
+digests. EIP-712 is the better answer and is the intended successor, because it
+binds a chain id and the verifying contract address — which is what stops an
+attestation minted for one `DiscaBridge` deployment being replayed against
+another, or against the same contract on a forked chain. Neither value exists
+until step 1 of §8 lands. The `/v1` suffix is how that migration stays loud.
+
+**What `fulfillJob` must do.** In order:
+
+1. `require(keccak256(resultBlob) == resultHash)` — §5a, unchanged.
+2. Reconstruct `digest` as above from the job's stored `programId ->
+   bytecodeHash`, the `jobId`, and the submitted `resultHash`. **Never from
+   anything in the calldata that the coordinator could vary.**
+3. For each attestation: `require(a.v == 27 || a.v == 28)` and reject high `s`
+   (EIP-2), then `ecrecover`. Reject `address(0)` — `ecrecover` returns it on
+   failure rather than reverting, and treating that as a signer is the classic
+   way to accept a forged signature.
+4. Require recovered addresses to be **distinct** and each `isRegisteredWorker`.
+   Requiring strictly ascending addresses makes distinctness an O(n) check with
+   no storage; the off-chain coordinator already sorts its attester set for this
+   reason.
+5. `require(count >= attestersRequired)`.
+
+Note what step 4 does *not* require: that the bridge dispatched to those
+workers. It never knew. An attestation is valid because of who signed it, not
+because of who was asked.
+
+**What this still does not prove.** That the signer evaluated anything. A worker
+can sign a wrong answer, and this is exactly what M-of-N is for; and because
+divergence is currently indistinguishable from dishonesty (see the note above
+and task 2.10b), a signed minority answer is evidence of *disagreement*, not of
+fraud, and must not feed slashing. What signatures buy is that the disagreement
+now has a name attached that nobody else could have written.
+
+## 2b. Superseded: the address-list design
+
+Recorded because the reasoning that produced it is easy to re-derive.
+
+The original interface was `fulfillJob(..., address[] attesters)`, justified as
+"simpler and cheaper than on-chain signature verification", with signature-based
+attestation deferred as an L1-ladder upgrade (`architecture.md` §11 Q3 leaned
+the same way).
+
+It does not work. The attester array came from the coordinator, so the contract
+could verify those addresses were distinct and registered — and nothing else.
+Any M registered addresses could be named beside any `resultHash`. The check
+looked like verification and was a formatting requirement.
+
+Nothing downstream catches it either: the key holder decrypts a plaintext and
+cannot tell a wrong one from a right one, which is the whole reason the job was
+worth paying for. So the failure is silent and permanent. That is a strictly
+worse property than having no attestation field at all, which would at least be
+honest about what is being trusted.
+
+The cost of fixing it is one `ecrecover` (~3,000 gas) plus 65 bytes of calldata
+per attester — order 10k gas for a 3-of-N job, against the ~250-350k `fulfillJob`
+already costs for the result blob. The "cheaper" option was cheaper by about 3%,
+in exchange for the property the contract exists to provide.
 
 ## 3. Key lifecycle
 
@@ -151,15 +258,25 @@ Minimal HTTP/JSON control plane with bincode bodies:
 
 - `POST /jobs` (coordinator -> worker): program bytecode, server key hash,
   decompressed input ciphertexts, job id.
-- `POST /results` (worker -> coordinator): job id, `keccak256(result ct)`,
-  worker id.
+- `POST /results` (worker -> coordinator): job id, the sealed result, and the
+  worker's `(r, s, v)` over the §2a claim. The worker id in the message is a log
+  label; the coordinator counts the address it recovers, not the name it is
+  given.
 - `GET /result/<jobId>` (key holder -> coordinator): compressed result
   ciphertext after `JobFulfilled`.
 
 Worker flow: pull server key once by hash -> for each job, decompress inputs,
-execute the `CircuitOp` sequence, hash result, report. Identical binaries run
-with `--role coordinator|worker`; the demo runs 1 coordinator + 3 workers as
-local processes (2-of-3 attestation).
+execute the `CircuitOp` sequence, seal the result, sign the §2a claim, report.
+Identical binaries run with `--role coordinator|worker`; the demo runs 1
+coordinator + 3 workers as local processes (2-of-3 attestation).
+
+A failure report is signed too, under `"DISCA/attest/failed/v1"` with
+`keccak256(reason)` in the result-hash slot. It never counts towards a quorum —
+a worker that could not evaluate has attested to nothing — but an *unsigned*
+failure would let anyone who can reach the coordinator manufacture evidence
+against an honest operator, which matters as soon as registration or reputation
+depends on who failed. The two tags are the same length and differ in one word,
+so neither claim can ever be read as the other.
 
 Chain watcher (coordinator): subscribes to `JobRequested`, validates blob
 count/commitments, dispatches, then submits `fulfillJob`. Implementation:
