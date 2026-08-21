@@ -11,7 +11,7 @@ See [bridge.md](bridge.md) for the Ethereum bridge design in depth.
 
 ## 1. Positioning
 
-DISCA's core thesis (per the whitepaper) is unchanged: a distributed computer using
+DISCA's core thesis (per the research paper) is unchanged: a distributed computer using
 FHE, not a blockchain. The Ethereum integration is an **adapter at the edge** — a
 bridge contract plus a chain watcher — not a change to the execution core.
 
@@ -297,7 +297,7 @@ Hash disagreement → job marked disputed, escrow refunded (slashing is roadmap)
 |---|---|---|
 | L0 | M-of-N worker attestation on deterministic execution + trusted key-holder reveal | Implemented |
 | L1 | Optimistic challenge window: anyone re-executes and disputes a result hash | Stretch |
-| L2 | ZK proof of correct homomorphic evaluation; threshold-FHE decryption; stake/slashing | Roadmap (whitepaper alignment) |
+| L2 | ZK proof of correct homomorphic evaluation; threshold-FHE decryption; stake/slashing | Roadmap (research-paper alignment) |
 
 ## 8. Workspace layout
 

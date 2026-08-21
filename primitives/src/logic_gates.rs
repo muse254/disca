@@ -6,7 +6,7 @@
 //!
 //! # Why it exists
 //!
-//! It is what the whitepaper's circuit-design section describes — "each stack
+//! It is what the research paper's circuit-design section describes — "each stack
 //! operation can be directly translated into FHE circuit gates" — and it was
 //! written first, before the evaluator existed. Nothing in the evaluation path
 //! calls it. `DiscaFunction::run` uses tfhe's high-level integer API instead:
@@ -37,7 +37,7 @@
 //! As the documented alternative rather than as clutter. Two things it would be
 //! the starting point for: bit-level operations the integer API does not expose,
 //! and any future work on circuit privacy or custom gate sets where controlling
-//! the gate sequence matters. Deleting it would leave the whitepaper describing
+//! the gate sequence matters. Deleting it would leave the research paper describing
 //! an approach with no implementation anywhere in the repo.
 //!
 //! # Not compiled by default
