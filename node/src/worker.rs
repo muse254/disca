@@ -304,3 +304,153 @@ fn report(coordinator: &str, report: JobReport) {
         error!(%error, "cannot deliver report");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use primitives::program::{DiscaProgram, Program};
+    // Only the fault-injection test encrypts and decrypts for real; a default
+    // build would carry these as unused imports.
+    #[cfg(feature = "fault-injection")]
+    use tfhe::prelude::FheDecrypt;
+    #[cfg(feature = "fault-injection")]
+    use tfhe::{ClientKey, ConfigBuilder, generate_keys};
+
+    use super::*;
+    use crate::protocol::InputBlob;
+
+    const MAX: &str = r#"
+    (module
+        (func $max (param i32 i32) (result i32)
+          local.get 0
+          local.get 1
+          local.get 0
+          local.get 1
+          i32.gt_s
+          select
+        )
+        (export "max" (func $max))
+    )
+    "#;
+
+    fn bytecode_for(wat: &str) -> Vec<u8> {
+        let program = DiscaProgram::from_program(&Program::from_wat(wat).unwrap());
+        bytecode::serialize(&program).unwrap()
+    }
+
+    /// A dispatch whose inputs are opaque bytes. Enough for every check that
+    /// happens before a ciphertext is decoded, which is all of them except
+    /// evaluation itself.
+    fn dispatch_with(bytecode: Vec<u8>, function: &str, inputs: Vec<InputBlob>) -> JobDispatch {
+        JobDispatch {
+            job_id: 1,
+            attestation_token: [0u8; 32],
+            bytecode,
+            function: function.into(),
+            inputs,
+            server_key_hash: [0u8; 32],
+        }
+    }
+
+    fn committed(bytes: Vec<u8>) -> InputBlob {
+        let commitment = wire::commitment(&bytes);
+        InputBlob { bytes, commitment }
+    }
+
+    #[test]
+    fn bytecode_that_is_not_bytecode_is_refused_before_any_evaluation() {
+        // A worker validates before it spends CPU (task 2.3). This is the
+        // cheapest place the check can fail and the only one where failing is
+        // free: past here, a bad circuit costs minutes of homomorphic work
+        // before anyone finds out.
+        let dispatch = dispatch_with(b"not a disca blob".to_vec(), "max", vec![]);
+
+        let error = evaluate(&dispatch, Behaviour::Honest).unwrap_err();
+        assert!(error.contains("DISCA"), "says what it rejected: {error}");
+    }
+
+    #[test]
+    fn a_dispatch_naming_a_function_the_program_does_not_export_is_refused() {
+        let dispatch = dispatch_with(bytecode_for(MAX), "tally4_select", vec![]);
+
+        let error = evaluate(&dispatch, Behaviour::Honest).unwrap_err();
+        assert!(
+            error.contains("tally4_select"),
+            "names the function it could not find: {error}"
+        );
+    }
+
+    #[test]
+    fn an_input_that_does_not_match_its_commitment_is_refused() {
+        // Task 2.9e is honest about what this buys today: the commitment
+        // travels with the bytes it commits to, so this detects corruption in
+        // transit rather than a malicious coordinator. It becomes adversarial
+        // once the commitment is read from the chain (2.9f), and the check has
+        // to still be here when that happens.
+        let mut blob = committed(vec![1, 2, 3, 4]);
+        blob.bytes[0] ^= 0xff;
+
+        let dispatch = dispatch_with(bytecode_for(MAX), "max", vec![blob]);
+
+        let error = evaluate(&dispatch, Behaviour::Honest).unwrap_err();
+        assert!(
+            error.contains("does not match its commitment"),
+            "got: {error}"
+        );
+        assert!(error.contains("input 0"), "names which input: {error}");
+    }
+
+    #[test]
+    fn an_input_that_matches_its_commitment_but_is_not_a_ciphertext_is_refused() {
+        // Passing the commitment check only proves the bytes arrived intact.
+        // They still have to be a ciphertext, and a peer can send bytes that
+        // are self-consistently committed to and still garbage.
+        let dispatch = dispatch_with(bytecode_for(MAX), "max", vec![committed(vec![0u8; 32])]);
+
+        assert!(evaluate(&dispatch, Behaviour::Honest).is_err());
+    }
+
+    // `Behaviour::Faulty` only exists behind `fault-injection`, so this test
+    // only exists there too. Nothing is lost in a default build: the behaviour
+    // under test is not compiled into it.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_faulty_worker_attests_to_a_different_hash_than_an_honest_one() {
+        // This is what makes scripts/run-local.sh mean anything. If injection
+        // ever stopped changing the result, the local run would show three
+        // workers agreeing and be read as a demonstration of M-of-N — when in
+        // fact it would demonstrate nothing at all.
+        //
+        // Real encryption, because the divergence has to survive compression
+        // and sealing to reach the coordinator as a different attestation.
+        let (client_key, server_key) = generate_keys(ConfigBuilder::default().build());
+        set_server_key(server_key);
+
+        let inputs = vec![encrypted(17, &client_key), encrypted(42, &client_key)];
+        let dispatch = dispatch_with(bytecode_for(MAX), "max", inputs);
+
+        let honest = evaluate(&dispatch, Behaviour::Honest).unwrap();
+        let faulty = evaluate(&dispatch, Behaviour::Faulty).unwrap();
+
+        assert_ne!(
+            honest.hash, faulty.hash,
+            "a faulty worker must not agree with an honest one"
+        );
+
+        // Well-formed, not corrupt: the coordinator has to be unable to tell
+        // the two apart by inspection, which is the whole point of M-of-N.
+        let decrypt = |sealed: &wire::SealedResult| -> i32 {
+            wire::decompress(&wire::decode(&sealed.blob).unwrap()).decrypt(&client_key)
+        };
+        assert_eq!(decrypt(&honest), 42, "max(17, 42)");
+        assert_eq!(
+            decrypt(&faulty),
+            84,
+            "the injected fault doubles the result"
+        );
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn encrypted(value: i32, client_key: &ClientKey) -> InputBlob {
+        committed(wire::encode(&wire::encrypt_input(value, client_key).unwrap()).unwrap())
+    }
+}

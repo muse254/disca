@@ -1,5 +1,10 @@
+# Install with: pre-commit install
+#
+# Ordered cheapest-first, and `fail_fast` stops at the first failure, so a
+# misspelling or a formatting slip is reported in a second rather than after
+# clippy has finished compiling tfhe.
 fail_fast: true
-default_install_hook_types: [pre-commit]
+default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit]
 repos:
   - repo: https://github.com/crate-ci/typos
@@ -10,13 +15,87 @@ repos:
         exclude: \.wat$
   - repo: local
     hooks:
-      - id: cargo-check
-        name: cargo check
-        entry: cargo check
+      # Formatting first: it is the only hook that can be satisfied by running
+      # one command, so failing here costs the least.
+      #
+      # Note that rust-toolchain.toml pins stable, and stable rustfmt ignores
+      # four of the five options in rustfmt.toml — imports_granularity,
+      # group_imports, format_code_in_doc_comments and error_on_unformatted are
+      # nightly-only, and are warned about but not applied. This hook enforces
+      # what stable rustfmt can enforce, which is less than the config asks for.
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --check
         language: system
+        types: [rust]
         pass_filenames: false
+
+      # --all-features, because `logic_gates` sits behind `boolean-circuits` and
+      # `--faulty` behind `fault-injection` (task 2.11b): code behind an
+      # off-by-default feature is never compiled by an ordinary build, so
+      # nothing type-checks it and it rots. --all-targets extends that to tests
+      # and examples. --locked so a manifest edit committed without its
+      # lockfile update fails here rather than in CI.
+      - id: cargo-check
+        name: cargo check (all features)
+        entry: cargo check --workspace --all-targets --all-features --locked
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # The other half, and not redundant: a feature gate can be missing from
+      # test code as easily as from production code, and --all-features cannot
+      # see it. This is what a release build actually compiles. Cheap — the
+      # dependency graph is identical, so only the workspace crates rebuild.
+      - id: cargo-check-default
+        name: cargo check (default features)
+        entry: cargo check --workspace --all-targets --locked
+        language: system
+        types: [rust]
+        pass_filenames: false
+
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy
+        entry: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
         language: system
+        types: [rust]
+        pass_filenames: false
+
+      # Coverage runs here on push, and in CI on `main` only. Two gates,
+      # because each covers the other's gap: this one is fast and catches the
+      # regression before it leaves the machine, and `main` catches the push
+      # that skipped this one with --no-verify.
+      #
+      # Not on PR pushes in CI: cargo-llvm-cov builds into a different target
+      # directory with RUSTC_WRAPPER set and can share nothing with the test
+      # job, so it pays for the dependency graph a second time to produce the
+      # numbers you are about to see here.
+      #
+      # Not on commit: warm it is about a minute, cold about five, and it
+      # measures the whole workspace, which is not what a single commit is. A
+      # hook that costs a minute every commit is a hook people disable, and a
+      # disabled hook enforces nothing. On push it runs once, over the state
+      # that is actually leaving the machine.
+      #
+      # `verbose: true` so the per-crate table is printed even when it passes —
+      # a floor you only see when it breaks tells you nothing about the margin.
+      - id: cargo-coverage
+        name: coverage floors (per crate)
+        entry: scripts/coverage.sh --check
+        language: system
+        files: '\.rs$|^scripts/(coverage\.sh|lib/coverage_report\.py)$'
+        pass_filenames: false
+        stages: [pre-push]
+        verbose: true
+
+      # Dependency and lockfile hygiene. Deliberately *not* `cargo update`:
+      # rewriting Cargo.lock on every commit is how the exact `tfhe` pin gets
+      # lost, and losing it breaks byte-reproducible evaluation silently — see
+      # the header of scripts/check-deps.sh. This checks the lockfile is in sync
+      # and the pin is intact, offline and in under a second.
+      - id: cargo-deps
+        name: dependency hygiene
+        entry: scripts/check-deps.sh
+        language: system
+        files: ^(Cargo\.(toml|lock)|.*/Cargo\.toml|scripts/(check-deps\.sh|lib/check_pins\.py))$
         pass_filenames: false
