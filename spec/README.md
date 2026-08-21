@@ -58,6 +58,38 @@ correspondence is reviewed by hand. It is the weakest link.
 
 ---
 
+## Keeping the model honest about the code
+
+There is no extraction and no refinement here: the correspondence between this
+model and the Rust is a careful reading, recorded in comments. A careful reading
+is a fact about one afternoon, not a property of the repository. Nothing stops
+somebody rewriting `tally` tomorrow, and nothing would stop this model passing
+afterwards while describing a `tally` that no longer exists — which is worse
+than having no model, because a green check reads as evidence.
+
+`spec/models.toml` records a hash of every function the model names, and
+`make -C spec drift` fails when one changes. It runs in CI *before* TLC, since
+the failure it catches is exactly the one TLC cannot: a model that is internally
+consistent and externally wrong.
+
+Comments and formatting are stripped before hashing, so rewording a comment or
+running `cargo fmt` does not trip it; changing what the code does will. When it
+does trip, re-read the model against the item it names — `models.toml` says what
+each corresponds to — and then either update the model or accept the change:
+
+```sh
+make -C spec accept-drift
+```
+
+Accepting is one command, which is the weakness. It is trivial to run it to turn
+a build green, and doing so quietly converts a checked claim into an unchecked
+one. The `models` line beside each entry is the question to answer first: if you
+cannot say what the function corresponds to in the spec, you are not in a
+position to accept its new hash.
+
+This is a tripwire, not a proof of correspondence. It cannot tell you the model
+is right — only that the ground it stands on has moved.
+
 ## What is assumed rather than proved
 
 Each of these is marked `ASSUMED` at the head of `DiscaAttestation.tla`.

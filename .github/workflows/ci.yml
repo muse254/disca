@@ -313,6 +313,13 @@ jobs:
       # says "download" instead of "model check".
       - name: fetch tla2tools.jar
         run: make -C spec jar
+      # Before TLC, not after. The model checks itself against itself, so it
+      # passes just as cheerfully when the code it claims to describe has been
+      # rewritten underneath it — and a green model check is read as evidence.
+      # This says which function moved and what the spec models it as.
+      - name: check the modelled code has not drifted
+        run: make -C spec drift
+
       - name: check every configuration
         run: make -C spec check
       # The counterexample traces are the readable output of this job, and a

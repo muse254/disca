@@ -1,0 +1,74 @@
+# The code `DiscaAttestation.tla` claims to model, and what it looked like when
+# that claim was last checked by a person.
+#
+# `drift.py --check` recomputes each hash and fails when one moves. Comments and
+# formatting are stripped first, so rewording a comment or running `cargo fmt`
+# does not trip it; changing what the code does will.
+#
+# This is a tripwire, not a proof of correspondence — there is no extraction and
+# no refinement between the model and the Rust, and `README.md` says so. What it
+# provides is that drift surfaces as a build failure at the moment it is
+# introduced, rather than as an archaeology problem later.
+#
+# `models` is not documentation. It is the question `--update` asks you: if you
+# cannot say what the item corresponds to in the spec, you are not in a position
+# to accept its new hash.
+#
+# Not listed yet: `quorum_error` and `fresh_job_id`, the two fixes PR #18 makes
+# for the MC_GraceRace_N4M2 and MC_ReplayPreempt_N3M2 counterexamples. They do
+# not exist on this branch, and an entry for an item that is not there fails
+# `--check` as GONE — correctly, but for the wrong reason. Add them with the fix.
+
+[[item]]
+file = "node/src/coordinator.rs"
+item = "fn attribute("
+models = "the Attribute action, and the registry check in QuorumIsReal"
+sha256 = "024f4dc8d2ed7f50f2fcecef0763dbe8a2a265aa1b72d5ca54ea580cca3c8e00"
+
+[[item]]
+file = "node/src/coordinator.rs"
+item = "fn record("
+models = "FirstWriteWins, and the VoteNotDisplaced invariant"
+sha256 = "dbcd2235966b85ef635efa6ffb0cb20673e4f015d7a7e5f7fd6af6a50559fc28"
+
+[[item]]
+file = "node/src/coordinator.rs"
+item = "fn group("
+models = "Groups: the inbox bucketed by attestation hash"
+sha256 = "46d0aa0950b5347e344d0579ff3942c1a4868b19c6476f6e88dd643600cc6f56"
+
+[[item]]
+file = "node/src/coordinator.rs"
+item = "fn tally("
+models = "Quorums and RefuseOnSplit; NoSettleOnSplit depends on it"
+sha256 = "27acde7751d50aae310cce36ab542b56397db95e481ba42cd53300b7838007b4"
+
+[[item]]
+file = "node/src/coordinator.rs"
+item = "fn agreement_still_possible("
+models = "AgreementStillPossible (flagged DIVERGENCE: modelled, not exhaustive)"
+sha256 = "f0dbbaa06f203ae58659be581797e47409a44c48ba7d713a501340a30a9215dc"
+
+[[item]]
+file = "primitives/src/attest.rs"
+item = "pub fn preimage("
+models = "Claim, and what an attestation binds — the 94 bytes SomeoneActuallyEvaluated rests on"
+sha256 = "fb2239bbf03d96fd57e958214fcc771c51b28db69015e96985c5c023eb1adfb7"
+
+[[item]]
+file = "primitives/src/attest.rs"
+item = "pub fn recover("
+models = "Recover, and the unforgeability ASSUMED note"
+sha256 = "5ac02aef6b5bd97b00d9cef752a3c3809f566572b75c256825f0fd4cdffe538d"
+
+[[item]]
+file = "bridge/src/DiscaBridge.sol"
+item = "function fulfillJob("
+models = "Fulfil, QuorumIsReal and EscrowPaidOnce"
+sha256 = "7fda203812f2461283b949955817c0fb3fe80e3b4ee4354c3556b257456f19e0"
+
+[[item]]
+file = "bridge/src/DiscaBridge.sol"
+item = "function refundOnTimeout("
+models = "Refund, and the other half of EscrowPaidOnce"
+sha256 = "1e56b840f089e58b5e83e6c0d7bffd7ebf6d13a45348e3a639e6d036efcb1d44"
