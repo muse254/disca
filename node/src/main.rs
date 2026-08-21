@@ -52,6 +52,7 @@ mod protocol;
 mod transport;
 mod worker;
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -70,9 +71,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Role {
-    /// Prepare a job, fan it out to workers, and settle on an M-of-N result.
+    /// Fan a prepared job out to workers and settle on an M-of-N result.
     ///
-    /// Also stands in for the key holder until job submission moves on-chain.
+    /// Takes blobs, not secrets: a server key and bytecode to distribute, and
+    /// inputs that are already ciphertext. The key holder is `disca-cli`, which
+    /// produced all three and is the only party that can read the result.
     Coordinator {
         /// Address to serve the server key and worker reports on.
         #[arg(long, default_value = "127.0.0.1:8080")]
@@ -100,19 +103,35 @@ enum Role {
         #[arg(long, default_value_t = 2)]
         attesters: usize,
 
-        /// WASM module to run. Must be built with optimizations — see
-        /// architecture.md §2a.
+        /// Compressed server key to distribute, from `disca-cli keygen`.
+        ///
+        /// The coordinator serves these bytes and hashes them to name the key.
+        /// It never installs one: nothing here evaluates or decrypts.
         #[arg(long)]
-        program: String,
+        server_key: PathBuf,
 
-        /// Exported function within that module.
+        /// DISCA bytecode to run, from `disca-cli compile`.
+        #[arg(long)]
+        bytecode: PathBuf,
+
+        /// Exported function within that program.
         #[arg(long)]
         function: String,
 
-        /// Comma-separated plaintext inputs. The key holder encrypts these; no
-        /// worker ever sees them.
-        #[arg(long, value_delimiter = ',', required = true)]
-        inputs: Vec<i32>,
+        /// An encrypted input, from `disca-cli encrypt`. Repeat in argument
+        /// order.
+        ///
+        /// Ciphertext, not values. Plaintext inputs used to be a flag here,
+        /// which put the secrets in this process's `argv` — visible to anyone
+        /// who can run `ps` on the machine that fans the job out, on a system
+        /// whose claim is that no node sees them.
+        #[arg(long = "input", required = true)]
+        inputs: Vec<PathBuf>,
+
+        /// Where to write the winning result blob. Still encrypted; feed it to
+        /// `disca-cli decrypt`.
+        #[arg(long = "result")]
+        result_out: Option<PathBuf>,
 
         /// How long to wait for agreement before giving up.
         #[arg(long, default_value_t = 120)]
@@ -220,6 +239,15 @@ enum Role {
     Demo,
 }
 
+/// Reads one of the blobs `disca-cli` produced, naming the file if it cannot.
+///
+/// Every input to a coordinator is now a file rather than a value, so "wrong
+/// path" is the most likely way to start a job badly. An error that names the
+/// path is the difference between fixing a typo and reading a stack trace.
+fn read_blob(path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
 fn main() {
     init_telemetry();
     pin_fft_plan();
@@ -230,19 +258,30 @@ fn main() {
             workers,
             registry,
             attesters,
-            program,
+            server_key,
+            bytecode,
             function,
             inputs,
+            result_out,
             deadline_secs,
         } => coordinator::parse_registry(&registry).and_then(|registry| {
+            let server_key = read_blob(&server_key)?;
+            let bytecode = read_blob(&bytecode)?;
+            let inputs = inputs
+                .iter()
+                .map(|path| read_blob(path))
+                .collect::<Result<Vec<_>, _>>()?;
+
             coordinator::run(coordinator::Config {
                 bind,
                 workers,
                 registry,
                 attesters,
-                program,
+                server_key,
+                bytecode,
                 function,
                 inputs,
+                result_out,
                 deadline: Duration::from_secs(deadline_secs),
             })
         }),
@@ -375,12 +414,16 @@ mod tests {
             "127.0.0.1:8081",
             "--registered-worker",
             "0x0000000000000000000000000000000000000001",
-            "--program",
-            "committee-tally/committee_tally.wasm",
+            "--server-key",
+            "keys/server.key",
+            "--bytecode",
+            "build/tally.bytecode",
             "--function",
             "tally4_select",
-            "--inputs",
-            "71,93,42,88",
+            "--input",
+            "build/input-0.ct",
+            "--input",
+            "build/input-1.ct",
         ])
         .unwrap();
 
@@ -396,7 +439,17 @@ mod tests {
             panic!("parsed as the wrong role");
         };
 
-        assert_eq!(inputs, vec![71, 93, 42, 88]);
+        // Paths, in the order given. Argument order is the call's argument
+        // order, and nothing downstream can notice if it is wrong: the inputs
+        // are ciphertext, so a transposition produces a plausible answer to a
+        // different question.
+        assert_eq!(
+            inputs,
+            vec![
+                PathBuf::from("build/input-0.ct"),
+                PathBuf::from("build/input-1.ct"),
+            ]
+        );
         assert_eq!(registry.len(), 1);
         // The defaults run-local.sh and the README rely on.
         assert_eq!(attesters, 2);
@@ -407,21 +460,55 @@ mod tests {
     #[test]
     fn a_coordinator_with_no_workers_is_refused_by_the_parser() {
         // Also checked in `coordinator::run`, but a job with nobody to dispatch
-        // to should not get as far as generating a keypair.
+        // to should not get as far as reading a key off disk.
+        // Every other flag is valid, so this fails for the reason under test
+        // rather than because an argument was renamed out from under it.
         assert!(
             Cli::try_parse_from([
                 "node",
                 "coordinator",
                 "--registered-worker",
                 "0x0000000000000000000000000000000000000001",
-                "--program",
-                "p.wasm",
+                "--server-key",
+                "keys/server.key",
+                "--bytecode",
+                "build/tally.bytecode",
                 "--function",
                 "f",
-                "--inputs",
-                "1",
+                "--input",
+                "build/input-0.ct",
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_coordinator_cannot_be_handed_plaintext_inputs() {
+        // The flag is gone, not merely discouraged. Plaintext inputs on this
+        // process's command line put the secret values in `argv` of the party
+        // that fans the job out — readable by anyone who can run `ps` — on a
+        // system whose claim is that no node ever sees them. Refusing is the
+        // difference between a fixed leak and one that returns the next time
+        // somebody finds the old invocation in their shell history.
+        assert!(
+            Cli::try_parse_from([
+                "node",
+                "coordinator",
+                "--worker",
+                "127.0.0.1:8081",
+                "--registered-worker",
+                "0x0000000000000000000000000000000000000001",
+                "--server-key",
+                "keys/server.key",
+                "--bytecode",
+                "build/tally.bytecode",
+                "--function",
+                "tally4_select",
+                "--inputs",
+                "71,93,42,88",
+            ])
+            .is_err(),
+            "--inputs must not be accepted in any form"
         );
     }
 

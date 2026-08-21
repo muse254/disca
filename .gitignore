@@ -3,17 +3,26 @@
 # OS artifacts
 .DS_Store
 
-# LaTeX build artifacts (see whitepaper/Makefile)
-whitepaper/*.aux
-whitepaper/*.log
-whitepaper/*.out
-whitepaper/*.toc
-whitepaper/*.lof
-whitepaper/*.lot
-whitepaper/*.bbl
-whitepaper/*.blg
-whitepaper/*.synctex.gz
-whitepaper/*.pdf
+# LaTeX build artifacts (see paper/Makefile)
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.lof
+paper/*.lot
+paper/*.bbl
+paper/*.blg
+paper/*.synctex.gz
+paper/*.pdf
 
 # Python bytecode from scripts/lib
 __pycache__/
+
+# Foundry build output (see bridge/foundry.toml). `broadcast/` is deployment
+# transaction logs written by `forge script`, which are per-run and per-chain.
+bridge/out/
+bridge/cache/
+bridge/broadcast/
+
+# Agent worktrees. Ephemeral, and each is its own checkout of this repo.
+.claude/

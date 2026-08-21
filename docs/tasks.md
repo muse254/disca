@@ -224,7 +224,7 @@ involved.
 - [x] **2.11a Keep `logic_gates` out of the binary.** The gate-composition route
       to FHE arithmetic has no callers — the evaluator uses tfhe's integer API.
       Now behind the `boolean-circuits` feature, off by default, documented as
-      the deliberate alternative rather than deleted (the whitepaper describes
+      the deliberate alternative rather than deleted (the research paper describes
       that approach and this is its only implementation). Its truth-table tests
       were ~7.3 s of the primitives suite, about a third, guarding unused code.
 - [ ] **2.11b Build with `--all-features` in CI.** `boolean-circuits` is not
@@ -350,7 +350,7 @@ to 6 of 6. Full write-up in architecture.md §3.
 - [ ] **4.4 End-to-end demo script** driving register → submit → evaluate →
       fulfill → decrypt.
 - [ ] **4.5 Demo video** + README rewrite (it currently documents only the
-      whitepaper build, not the project).
+      research-paper build, not the project).
 
 ## Stretch (only if the above is done)
 

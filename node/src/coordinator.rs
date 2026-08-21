@@ -21,11 +21,19 @@
 //! transact for itself and counting `msg.sender`. The moment one party votes on
 //! behalf of others, unsigned attestations stop meaning anything off-box.
 //!
-//! For now the coordinator also stands in for the **key holder**: it generates
-//! the keypair, encrypts the inputs and decrypts the winning result. Those are
-//! separate parties in the real design (`architecture.md` §3) and separate
-//! processes once job submission moves on-chain in Track 3. Everything the key
-//! holder does here is confined to [`KeyHolder`] so the seam is visible.
+//! The coordinator does not hold the client key and never sees a plaintext.
+//! It is handed a server key blob, a bytecode blob and already-encrypted input
+//! blobs, and it hands back the result blob still encrypted. The key holder is
+//! `disca-cli` — a separate process that generates the keypair, encrypts the
+//! inputs and decrypts the result, and that never talks to a worker
+//! (`architecture.md` §3, task 4.3).
+//!
+//! That split is not tidiness. `registerProgram` pins a server key hash
+//! on-chain at registration (`bridge.md` §3), so a coordinator that minted its
+//! own keypair on every start could never match a registered program — it has
+//! to be *given* a key, not produce one. And a coordinator that took plaintext
+//! inputs on its command line put the secret values in `argv` of the party that
+//! fans the job out, on a system whose whole claim is that no node sees them.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -34,12 +42,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use std::path::PathBuf;
+
 use primitives::attest::{self, Address, Claim};
-use primitives::program::{DiscaProgram, Program};
 use primitives::wire::{self, SealedResult};
 use primitives::{bytecode, validate};
-use tfhe::prelude::FheDecrypt;
-use tfhe::{ClientKey, CompressedServerKey, ConfigBuilder, generate_keys, set_server_key};
 use tracing::{info, info_span, warn};
 
 use crate::protocol::{InputBlob, JobDispatch, JobOutcome, JobReport};
@@ -56,9 +63,20 @@ pub struct Config {
     /// generate M keypairs and out-vote the honest workers for free.
     pub registry: Vec<Address>,
     pub attesters: usize,
-    pub program: String,
+    /// The compressed server key, as `disca-cli keygen` wrote it. The
+    /// coordinator serves these bytes to workers and hashes them to name the
+    /// key; it never installs one, because nothing here evaluates or decrypts.
+    pub server_key: Vec<u8>,
+    /// DISCA bytecode, as `disca-cli compile` wrote it.
+    pub bytecode: Vec<u8>,
+    /// Which exported function of that program to run.
     pub function: String,
-    pub inputs: Vec<i32>,
+    /// Already-encrypted inputs, in argument order. The coordinator cannot read
+    /// them and does not need to.
+    pub inputs: Vec<Vec<u8>>,
+    /// Where to write the result blob once the job settles. The coordinator
+    /// cannot decrypt it; `disca-cli decrypt` can.
+    pub result_out: Option<PathBuf>,
     pub deadline: Duration,
 }
 
@@ -90,56 +108,6 @@ pub fn parse_registry(entries: &[String]) -> Result<Vec<Address>, String> {
 /// faulty or dishonest worker becomes visible. Wait this long for the remaining
 /// workers before settling. Bounded, so one hung worker cannot hold a job open.
 const STRAGGLER_GRACE: Duration = Duration::from_secs(5);
-
-/// The party that holds the client key. Kept as its own type because it is the
-/// privacy boundary: nothing outside this struct can decrypt anything.
-struct KeyHolder {
-    client_key: ClientKey,
-}
-
-impl KeyHolder {
-    fn new() -> (Self, Vec<u8>, [u8; 32]) {
-        let started = Instant::now();
-        let (client_key, server_key) = generate_keys(ConfigBuilder::default().build());
-
-        // The key holder needs the server key too: decompressing the returned
-        // result is a server-key operation, even though decrypting it is not.
-        // The server key is public, and this party generated it.
-        set_server_key(server_key);
-
-        // Workers receive the compressed key: 28.8 MB rather than 114.8 MB.
-        let compressed = CompressedServerKey::new(&client_key);
-        let encoded = wire::encode_server_key(&compressed).expect("encode server key");
-        let hash = wire::commitment(&encoded);
-
-        info!(
-            server_key_bytes = encoded.len(),
-            server_key_hash = %bytecode::hex(&hash),
-            elapsed_ms = started.elapsed().as_millis(),
-            "keys generated"
-        );
-
-        (Self { client_key }, encoded, hash)
-    }
-
-    fn encrypt(&self, values: &[i32]) -> Result<Vec<InputBlob>, String> {
-        values
-            .iter()
-            .map(|value| {
-                let compressed =
-                    wire::encrypt_input(*value, &self.client_key).map_err(|e| e.to_string())?;
-                let bytes = wire::encode(&compressed).map_err(|e| e.to_string())?;
-                let commitment = wire::commitment(&bytes);
-                Ok(InputBlob { bytes, commitment })
-            })
-            .collect()
-    }
-
-    fn decrypt(&self, sealed: &SealedResult) -> Result<i32, String> {
-        let ciphertext = wire::decode(&sealed.blob).map_err(|e| e.to_string())?;
-        Ok(wire::decompress(&ciphertext).decrypt(&self.client_key))
-    }
-}
 
 /// Reports collected for the job in flight, keyed by the address that signed
 /// each one.
@@ -256,9 +224,20 @@ pub fn run(config: Config) -> Result<(), String> {
     // (`bridge.md` §2, task 2.9f).
     let job_id = 1;
 
-    let (key_holder, server_key_bytes, server_key_hash) = KeyHolder::new();
-    let bytecode_blob = compile(&config.program, &config.function)?;
-    let program_hash = bytecode::hash_bytecode(&bytecode_blob);
+    // The key is a blob to this process. Naming it by hash is what lets a
+    // worker verify what it pulled (`worker.rs`), and is the same value
+    // `registerProgram` pins on-chain (`bridge.md` §3).
+    let server_key_hash = wire::commitment(&config.server_key);
+    let program_hash = bytecode::hash_bytecode(&config.bytecode);
+
+    let arity = check_program(&config.bytecode, &config.function)?;
+    if config.inputs.len() != arity {
+        return Err(format!(
+            "{} takes {arity} input(s), but {} were supplied",
+            config.function,
+            config.inputs.len()
+        ));
+    }
 
     let verifier = Arc::new(Verifier {
         job_id,
@@ -270,7 +249,7 @@ pub fn run(config: Config) -> Result<(), String> {
     let (wake, woken) = channel::<()>();
     serve(
         &config.bind,
-        server_key_bytes,
+        config.server_key.clone(),
         server_key_hash,
         inbox.clone(),
         verifier,
@@ -280,7 +259,20 @@ pub fn run(config: Config) -> Result<(), String> {
     let span = info_span!("job", job_id, function = %config.function);
     let _enter = span.enter();
 
-    let inputs = key_holder.encrypt(&config.inputs)?;
+    // Commitments are computed here rather than trusted from the caller: they
+    // are `keccak256` of bytes this process is holding, so recomputing costs
+    // nothing and removes a way for them to disagree. Once `submitJob` exists
+    // these come from the chain instead, which is what makes the worker's check
+    // adversarial rather than diagnostic (task 2.9f).
+    let inputs: Vec<InputBlob> = config
+        .inputs
+        .iter()
+        .map(|bytes| InputBlob {
+            commitment: wire::commitment(bytes),
+            bytes: bytes.clone(),
+        })
+        .collect();
+
     info!(
         program_hash = %bytecode::hex(&program_hash),
         inputs = inputs.len(),
@@ -292,7 +284,7 @@ pub fn run(config: Config) -> Result<(), String> {
 
     let dispatch = JobDispatch {
         job_id,
-        bytecode: bytecode_blob,
+        bytecode: config.bytecode.clone(),
         function: config.function.clone(),
         inputs,
         server_key_hash,
@@ -311,9 +303,13 @@ pub fn run(config: Config) -> Result<(), String> {
 
     match outcome {
         Some((sealed, attesters)) => {
-            let value = key_holder.decrypt(&sealed)?;
+            if let Some(path) = &config.result_out {
+                std::fs::write(path, &sealed.blob)
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            }
             info!(
-                result = value,
+                result_bytes = sealed.blob.len(),
+                result_out = ?config.result_out,
                 result_hash = %bytecode::hex(&sealed.hash),
                 // Recovered, not asserted. `fulfillJob` will take the
                 // *signatures* rather than these addresses (`bridge.md` §2) and
@@ -336,24 +332,26 @@ pub fn run(config: Config) -> Result<(), String> {
 
 /// Compiles a WASM module to bytecode, checking up front that the function the
 /// job names exists and is runnable.
-fn compile(path: &str, function: &str) -> Result<Vec<u8>, String> {
-    let wasm = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    let parsed = Program::from_wasm(&wasm).map_err(|e| e.to_string())?;
-    let program = DiscaProgram::from_program(&parsed);
+fn check_program(bytecode_blob: &[u8], function: &str) -> Result<usize, String> {
+    // `deserialize` already validates every circuit it accepts (task 1.4), so
+    // this rejects a malformed program before a worker is asked to spend
+    // minutes on it. The coordinator is no longer the compiler — `disca-cli
+    // compile` is — but it is still the last party that can fail cheaply.
+    let program = bytecode::deserialize(bytecode_blob).map_err(|e| e.to_string())?;
 
     let func = program
         .function(function)
-        .ok_or_else(|| format!("{path} exports no function named {function}"))?;
+        .ok_or_else(|| format!("the program exports no function named {function}"))?;
 
-    // Fail here rather than after fanning a doomed job out to every worker.
     let layout = validate::validate(func).map_err(|e| e.to_string())?;
     info!(
         ops = func.body.len(),
         peak_stack = layout.max_depth,
-        "program compiled"
+        params = func.sig.params.len(),
+        "program accepted"
     );
 
-    bytecode::serialize(&program).map_err(|e| e.to_string())
+    Ok(func.sig.params.len())
 }
 
 /// Starts the HTTP surface: the server key by hash, and worker reports.
@@ -1136,34 +1134,38 @@ mod tests {
         "/../committee-tally/committee_tally.wasm"
     );
 
-    #[test]
-    fn a_compiled_program_is_something_a_worker_can_decode_and_run() {
-        // The coordinator compiles once and every worker decodes the same
-        // blob. If what `compile` emits were not accepted by
-        // `bytecode::deserialize` -- which validates as well as decodes -- the
-        // job would fan out to every worker and fail on all of them at once.
-        let blob = compile(TALLY_WASM, "tally4_select").unwrap();
-
-        let program = bytecode::deserialize(&blob).expect("a worker must accept this");
-        let func = program
-            .function("tally4_select")
-            .expect("the function the job named");
-        assert_eq!(func.sig.params.len(), 4);
-        assert_eq!(func.sig.results.len(), 1);
+    /// The tally program as `disca-cli compile` would hand it over.
+    fn tally_bytecode() -> Vec<u8> {
+        use primitives::program::{DiscaProgram, Program};
+        let wasm = std::fs::read(TALLY_WASM).expect("the committed demo circuit");
+        let program = DiscaProgram::from_program(&Program::from_wasm(&wasm).unwrap());
+        bytecode::serialize(&program).unwrap()
     }
 
     #[test]
-    fn compiling_refuses_a_function_the_program_does_not_export() {
-        // Cheap here, expensive later: this runs before keygen and before any
-        // dispatch, so a typo costs a millisecond instead of fanning a doomed
-        // job out to three workers and waiting for the deadline.
-        let error = compile(TALLY_WASM, "tally5_select").unwrap_err();
+    fn a_program_blob_is_checked_before_a_worker_is_asked_to_run_it() {
+        // The coordinator no longer compiles -- `disca-cli compile` does -- but
+        // it is still the last party that can fail cheaply. Every worker will
+        // decode this same blob, so a blob that does not decode here would fan
+        // out and fail on all of them at once.
+        let arity = check_program(&tally_bytecode(), "tally4_select").unwrap();
+        assert_eq!(arity, 4, "the caller checks its input count against this");
+    }
+
+    #[test]
+    fn checking_refuses_a_function_the_program_does_not_export() {
+        // Cheap here, expensive later: this runs before any dispatch, so a typo
+        // costs a millisecond instead of three workers and a deadline.
+        let error = check_program(&tally_bytecode(), "tally5_select").unwrap_err();
         assert!(error.contains("tally5_select"), "names it: {error}");
     }
 
     #[test]
-    fn compiling_refuses_a_program_that_is_not_there() {
-        let error = compile("committee-tally/does-not-exist.wasm", "max2").unwrap_err();
-        assert!(error.contains("does-not-exist.wasm"), "names it: {error}");
+    fn checking_refuses_bytes_that_are_not_bytecode() {
+        // The blob arrives as a file path from the command line, so "not
+        // bytecode at all" is a typo away and must be an error rather than
+        // something a worker discovers.
+        let error = check_program(b"not bytecode", "tally4_select").unwrap_err();
+        assert!(!error.is_empty(), "the rejection has to say something");
     }
 }

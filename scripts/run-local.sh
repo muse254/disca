@@ -34,10 +34,17 @@ fi
 
 # fault-injection is off by default, so a release build cannot be told to
 # return a wrong answer. This demo needs exactly that, so it opts in explicitly.
-echo "building node (with fault-injection)..."
+echo "building node (with fault-injection) and disca-cli..."
 cargo build --release -p node --features fault-injection
+cargo build --release -p disca-cli
 
 NODE=target/release/node
+CLI=target/release/disca-cli
+
+# Everything the key holder produces lives here and is thrown away afterwards.
+# The client key never leaves this directory, and no other process in this
+# script is given a path to it.
+work=$(mktemp -d "${TMPDIR:-/tmp}/disca-demo.XXXXXX")
 
 # A worker left over from an earlier run would still be bound to one of these
 # ports, and the new one would silently fail to start -- leaving the old
@@ -47,8 +54,37 @@ for port in 8080 8081 8082 8083; do
 done
 
 pids=()
-cleanup() { for pid in "${pids[@]:-}"; do kill "$pid" 2>/dev/null || true; done; }
+cleanup() {
+  for pid in "${pids[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+  rm -rf "$work"
+}
 trap cleanup EXIT
+
+# --- the key holder -----------------------------------------------------
+#
+# `disca-cli` is a separate process here for the same reason it is a separate
+# party in the design: it is the only thing that ever holds the client key or
+# sees a plaintext. The coordinator below is started with paths to a public key
+# and to ciphertexts, and could not decrypt the result it settles on even if it
+# wanted to.
+echo "key holder: generating keys..."
+"$CLI" keygen --out-dir "$work/keys" --force
+
+echo "key holder: compiling $PROGRAM..."
+"$CLI" compile --input "$PROGRAM" --output "$work/program.bytecode"
+
+echo "key holder: encrypting inputs..."
+"$CLI" encrypt --client-key "$work/keys/client.key" \
+  --values "$INPUTS" --out-dir "$work/inputs"
+
+# The dispatch takes them in argument order, and nothing downstream can notice
+# a transposition: the inputs are ciphertext, so the wrong order produces a
+# plausible answer to a different question.
+input_flags=()
+IFS=',' read -ra values <<< "$INPUTS"
+for i in "${!values[@]}"; do
+  input_flags+=(--input "$work/inputs/input-$i.ct")
+done
 
 third_worker_flags=(--id worker-3 --bind 127.0.0.1:8083)
 if [ -z "${HONEST:-}" ]; then
@@ -87,7 +123,32 @@ done
   --worker 127.0.0.1:8083 \
   "${registry[@]}" \
   --attesters "$ATTESTERS" \
-  --program "$PROGRAM" \
+  --server-key "$work/keys/server.key" \
+  --bytecode "$work/program.bytecode" \
   --function "$FUNCTION" \
-  --inputs "$INPUTS" \
+  "${input_flags[@]}" \
+  --result "$work/result.blob" \
   --deadline-secs "$DEADLINE"
+
+# --- the key holder again -----------------------------------------------
+#
+# The coordinator wrote a blob it cannot read. Only this step can, and only
+# because it holds the client key -- which is the claim the whole system makes,
+# reduced to something you can watch happen.
+#
+# Asserting the value matters: every earlier check in this script is about
+# workers agreeing, and workers agreeing on the *wrong* answer would satisfy
+# all of them. `attestation.md` §1 is explicit that nothing downstream can tell
+# a wrong plaintext from a right one, so this is the only place the run can
+# notice.
+expected=${EXPECT:-$(printf '%s\n' "${values[@]}" | sort -n | tail -1)}
+decrypted=$("$CLI" decrypt \
+  --client-key "$work/keys/client.key" \
+  --server-key "$work/keys/server.key" \
+  --input "$work/result.blob")
+
+if [ "$decrypted" != "$expected" ]; then
+  echo "FAIL: key holder decrypted $decrypted, expected $expected" >&2
+  exit 1
+fi
+echo "key holder decrypted: $decrypted (expected $expected)"

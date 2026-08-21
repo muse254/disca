@@ -53,9 +53,17 @@ FLOORS = {
         "harness today, and it is not instrumented",
     ),
     "disca-cli": (
-        0,
-        "stubs. `parse` does nothing and `wasm_binary_to_wat` is todo!(); "
-        "raise this when task 4.3 implements them",
+        85,
+        "the key holder (task 4.3), and held as high as primitives for the "
+        "same reason: it is the only party that can encrypt or decrypt "
+        "anything, so a bug here is a wrong plaintext or a lost key rather "
+        "than a failed job. It is also almost entirely testable -- the "
+        "commands take paths and values and return a Result, `main` only "
+        "dispatches, and the one test that matters runs keygen -> compile -> "
+        "encrypt -> evaluate -> decrypt through a scratch directory. What is "
+        "left uncovered is `main` itself and the I/O failure arms (a "
+        "directory that cannot be created, an encoder that cannot encode), "
+        "which need a broken filesystem to reach",
     ),
 }
 
