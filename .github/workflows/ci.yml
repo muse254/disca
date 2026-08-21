@@ -331,3 +331,55 @@ jobs:
           name: tlc-logs
           path: spec/out/*.log
           retention-days: 14
+
+  # The bridge against a real chain: scripts/run-anvil.sh, in the mode that
+  # needs no Rust (task 3.3).
+  #
+  # The script has two modes and only one of them belongs here.
+  #
+  # `--synthetic` starts an Anvil, deploys, registers workers and a program,
+  # posts a job through `CommitteeTally`, settles it with real secp256k1
+  # signatures over the docs/bridge.md §2a claim, checks the escrow moved by
+  # exactly the escrow minus the gas, pulls the result blob back out of the
+  # `JobFulfilled` event, and then runs a second job to a timeout and a refund.
+  # Every contract call and every assertion is real. What is fake is the
+  # ciphertext: the blobs are random bytes of the right size, because nothing
+  # in this job can evaluate FHE.
+  #
+  # The default mode — the one that runs three DISCA workers, stages one liar,
+  # watches it outvoted 2-of-3 and then decisive at 3-of-3 — is deliberately
+  # NOT here. It needs `cargo build --release -p node --features
+  # fault-injection`, which is a different feature resolution from the `test`
+  # job above and so shares no cache with it: an hour of tfhe, in a release
+  # profile nothing else in this workflow builds, to re-check agreement that
+  # `cargo test` already checks. It stays a local command, documented in the
+  # script's header.
+  #
+  # So what this job actually gates is the chain half and the shell: that
+  # `Deploy.s.sol` deploys, that the transactions this repo will demo with go
+  # through, and that a refactor of DiscaBridge has not broken the script that
+  # drives it. It says nothing about M-of-N.
+  bridge-e2e:
+    name: anvil end to end
+    runs-on: ubuntu-latest
+    # Under a minute in practice; the ceiling is here to catch an anvil that
+    # never binds rather than to budget for work.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # forge-std is a submodule (bridge/lib/forge-std); without this every
+          # import in bridge/ fails.
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      # bash -n and shellcheck before running it: a syntax error inside a
+      # branch the run does not take would otherwise ship green.
+      - name: lint the shell
+        run: |
+          bash -n scripts/run-anvil.sh
+          bash -n bridge/script/fixtures/sign-attestations.sh
+          shellcheck scripts/run-anvil.sh bridge/script/fixtures/sign-attestations.sh
+      - name: the round trip
+        run: ./scripts/run-anvil.sh --synthetic

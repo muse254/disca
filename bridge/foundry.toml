@@ -22,8 +22,13 @@ optimizer_runs = 1000
 gas_reports = ["DiscaBridge"]
 
 # test/AttestationVector.t.sol reads the cross-language vector produced by the
-# Rust side; nothing here writes.
-fs_permissions = [{ access = "read", path = "./test/vectors" }]
+# Rust side, and test/FixtureSettlement.t.sol reads the attestation/result pair
+# that scripts/run-anvil.sh carries between the off-chain network and the chain
+# (task 3.3). Nothing here writes.
+fs_permissions = [
+  { access = "read", path = "./test/vectors" },
+  { access = "read", path = "./script/fixtures" },
+]
 
 [fmt]
 line_length = 100
