@@ -128,7 +128,27 @@ done
   --function "$FUNCTION" \
   "${input_flags[@]}" \
   --result "$work/result.blob" \
+  --attestations "$work/attestations.json" \
   --deadline-secs "$DEADLINE"
+
+# The evidence beside the answer. There is no chain in this run, so nothing
+# consumes the file here -- but writing it is the cheapest way to keep the
+# format honest: it is produced from real signatures over a real settlement,
+# and `fulfillJob` requires the attesters in strictly increasing address order
+# (bridge.md §2a step 4), which is a property no unit test can observe about
+# *this* run's addresses.
+attesters=$(grep -c '"address"' "$work/attestations.json")
+if [ "$attesters" -lt "$ATTESTERS" ]; then
+  echo "FAIL: attestations.json names $attesters attester(s), expected $ATTESTERS" >&2
+  exit 1
+fi
+# LC_ALL=C so the comparison is byte order, which is what a contract comparing
+# `address` values does. A locale-aware sort can disagree with it.
+if ! grep -o '"address": "[^"]*"' "$work/attestations.json" | LC_ALL=C sort -c 2>/dev/null; then
+  echo "FAIL: attestations.json is not in ascending address order; fulfillJob would revert" >&2
+  exit 1
+fi
+echo "attestations: $attesters signature(s), ascending by address"
 
 # --- the key holder again -----------------------------------------------
 #

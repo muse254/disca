@@ -38,12 +38,14 @@
 //!   `registerWorker` set — there is no chain yet (`bridge.md` §2), so the
 //!   registry is only as good as the operator who typed it.
 //! * **Job ids are unique.** They are bound into every signature, which is what
-//!   stops an attestation being lifted onto another job — but the coordinator
-//!   numbers every job 1 until `submitJob` assigns ids (task 2.9f). Two runs
-//!   over the same program and inputs therefore produce interchangeable
-//!   attestations.
-//! * **One key holder per program, currently the coordinator process.** The
-//!   real design separates them; `KeyHolder` in `coordinator.rs` marks the seam.
+//!   stops an attestation being lifted onto another job. The coordinator now
+//!   mints one per job (`fresh_job_id`), so ids are unique *per coordinator*
+//!   and separate concurrent jobs from each other and from earlier runs. They
+//!   are not globally unique and they commit to nothing: two coordinators can
+//!   still collide, and neither can show a contract that its id was ever
+//!   issued. `submitJob` assigning the id is what makes this sound rather than
+//!   merely unlikely (task 2.9f), and `JobSpec::job_id` is where that id
+//!   arrives.
 
 mod coordinator;
 #[cfg(debug_assertions)]
@@ -132,6 +134,20 @@ enum Role {
         /// `disca-cli decrypt`.
         #[arg(long = "result")]
         result_out: Option<PathBuf>,
+
+        /// Where to write the winning group's signatures, as JSON.
+        ///
+        /// The evidence, beside the answer. `--result` is the ciphertext a key
+        /// holder decrypts; this is what a contract is handed to check that the
+        /// ciphertext was agreed by M registered workers rather than asserted
+        /// by this process — the `Attestation[]` argument `fulfillJob` takes
+        /// (`bridge.md` §2, task 3.3).
+        ///
+        /// Attesters are written in ascending address order, because
+        /// `fulfillJob` requires strictly increasing addresses so that
+        /// duplicate detection costs one comparison each.
+        #[arg(long = "attestations")]
+        attestations_out: Option<PathBuf>,
 
         /// How long to wait for agreement before giving up.
         #[arg(long, default_value_t = 120)]
@@ -263,6 +279,7 @@ fn main() {
             function,
             inputs,
             result_out,
+            attestations_out,
             deadline_secs,
         } => coordinator::parse_registry(&registry).and_then(|registry| {
             let server_key = read_blob(&server_key)?;
@@ -282,6 +299,7 @@ fn main() {
                 function,
                 inputs,
                 result_out,
+                attestations_out,
                 deadline: Duration::from_secs(deadline_secs),
             })
         }),

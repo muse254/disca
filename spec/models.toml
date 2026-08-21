@@ -13,6 +13,34 @@
 # `models` is not documentation. It is the question `--update` asks you: if you
 # cannot say what the item corresponds to in the spec, you are not in a position
 # to accept its new hash.
+#
+# ---------------------------------------------------------------------------
+# A note the hashes cannot carry, recorded when the coordinator became a job
+# service (`docs/next-architecture.md` §4, step 3).
+#
+# That change keyed every piece of a job's state by job id: one inbox, one
+# verifier, one dispatch set and one deadline *per job* rather than per process.
+# None of the items below moved a line — `attribute`, `record`, `group`,
+# `tally`, `agreement_still_possible` and `quorum_error` were already functions
+# of one job's state, and there was simply only ever one job's state to hand
+# them — so nothing here needed re-recording, and none of these hashes was
+# accepted rather than earned.
+#
+# What did change is the *quantifier*. `DiscaAttestation.tla` models one job,
+# and every item below now describes one job among several rather than the only
+# one there is. The model still describes each of them exactly, because it
+# describes a job in isolation and isolation is now structural: two jobs share
+# the map they are looked up in and nothing else.
+#
+# What the model does not describe, and did not before either, is anything
+# *between* two concurrent jobs. `README.md` lists that under "what could not be
+# verified" ("Concurrent jobs. One job."), where it used to be a hypothetical.
+# It is now a live gap: the code has behaviour — routing a report to a job by
+# the id it names, refusing one for a job nobody accepted — that no configuration
+# in this directory checks. `two_jobs_in_flight_settle_independently` in
+# `node/src/coordinator.rs` is a unit test standing where a model check should
+# be, and a unit test is a fact about one interleaving.
+# ---------------------------------------------------------------------------
 
 [[item]]
 file = "node/src/coordinator.rs"
