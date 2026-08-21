@@ -259,9 +259,18 @@ to 6 of 6. Full write-up in architecture.md §3.
       **Sign a digest, not the bare result hash.** `resultHash` is
       `keccak256(blob)` and commits to no job, program or worker, so a signature
       over it alone is replayable onto any other job with the same output — the
-      hole moves rather than closes. The signed digest must bind at least
-      `(domain, chainId, bridge, jobId, programId, resultHash)`, and the raw
-      `resultHash` stays as the grouping key for M-of-N. Recoverable (r, s, v)
+      hole moves rather than closes. The raw `resultHash` stays as the grouping
+      key for M-of-N.
+
+      **Decided: v1 binds `(domain, jobId, bytecodeHash, resultHash)` under
+      EIP-191; `chainId` and the verifying contract arrive as `/v2` under
+      EIP-712 when the bridge is deployed.** Those two values do not exist
+      until then, and signing placeholders for them produces signatures that
+      have to be reinterpreted later — silent breakage of exactly the kind the
+      version tag exists to make loud. EIP-191 already buys what matters now:
+      `0x19` is not a legal leading byte for an RLP transaction, so an
+      attestation cannot be replayed as one, and the key stays usable behind
+      any `personal_sign` interface. Implemented in #13. Recoverable (r, s, v)
       signatures, so a contract can `ecrecover` without being handed a pubkey.
       The preimage layout is a schema decision Solidity has to reconstruct byte
       for byte, and `SealedResult` is already threaded through
