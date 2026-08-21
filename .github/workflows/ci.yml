@@ -246,3 +246,46 @@ jobs:
           name: coverage-lcov
           path: target/lcov.info
           retention-days: 14
+
+  # The TLA+ specification of M-of-N attestation and settlement (spec/).
+  #
+  # Independent of the Rust build: nothing in this job compiles the
+  # workspace, so it needs no rust-cache key and no `needs:`. It runs in
+  # under a minute on eight cores, which is why it is not gated behind
+  # `check` the way `test` is.
+  #
+  # spec/check.sh fails in both directions and that is the point. Half the
+  # configurations are counterexamples that are *supposed* to violate a named
+  # invariant, and the script exits non-zero if one of those stops finding
+  # its counterexample. A spec that only checks "no errors were found" cannot
+  # tell a proof from a model that stopped modelling anything, so the gate
+  # has to notice when a check goes quiet.
+  spec:
+    name: tla+ model check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      # TLC needs a JVM and nothing else. Temurin 21 rather than latest: TLA+
+      # 1.7.4 targets Java 11+, and pinning a major keeps a JDK release from
+      # turning into a failure in this job.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # tla2tools.jar is fetched rather than committed, and pinned by SHA-256
+      # in check.sh. Fetching it in a step of its own means a download failure
+      # says "download" instead of "model check".
+      - name: fetch tla2tools.jar
+        run: make -C spec jar
+      - name: check every configuration
+        run: make -C spec check
+      # The counterexample traces are the readable output of this job, and a
+      # failure here is almost always "which trace changed".
+      - name: upload the TLC logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tlc-logs
+          path: spec/out/*.log
+          retention-days: 14
