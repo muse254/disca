@@ -130,6 +130,16 @@ enum Role {
         #[arg(long = "input", required = true)]
         inputs: Vec<PathBuf>,
 
+        /// Run under a job id a chain already assigned, rather than minting one.
+        ///
+        /// Workers sign a digest binding the job id, and `fulfillJob` rebuilds
+        /// that digest from the id `submitJob` returned. Settling on-chain
+        /// therefore requires the two to be the same id — without this the
+        /// signatures recover to addresses the registry has never heard of, and
+        /// a correct result is rejected as if the workers were impostors.
+        #[arg(long)]
+        job_id: Option<u64>,
+
         /// Where to write the winning result blob. Still encrypted; feed it to
         /// `disca-cli decrypt`.
         #[arg(long = "result")]
@@ -274,6 +284,7 @@ fn main() {
             workers,
             registry,
             attesters,
+            job_id,
             server_key,
             bytecode,
             function,
@@ -294,6 +305,7 @@ fn main() {
                 workers,
                 registry,
                 attesters,
+                job_id,
                 server_key,
                 bytecode,
                 function,
@@ -498,6 +510,64 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_coordinator_can_be_told_which_job_id_the_chain_assigned() {
+        // The whole of on-chain settlement turns on this: a worker signs a
+        // digest binding the job id, `fulfillJob` rebuilds that digest from the
+        // id `submitJob` returned, and if the coordinator minted its own
+        // instead, every signature recovers to an address the registry has
+        // never seen. A correct result is then rejected as if the workers were
+        // impostors, which is the least informative possible failure.
+        let cli = Cli::try_parse_from([
+            "node",
+            "coordinator",
+            "--worker",
+            "127.0.0.1:8081",
+            "--registered-worker",
+            "0x0000000000000000000000000000000000000001",
+            "--server-key",
+            "keys/server.key",
+            "--bytecode",
+            "build/tally.bytecode",
+            "--function",
+            "tally4_select",
+            "--input",
+            "build/input-0.ct",
+            "--job-id",
+            "42",
+        ])
+        .unwrap();
+
+        let Role::Coordinator { job_id, .. } = cli.role else {
+            panic!("parsed as the wrong role");
+        };
+        assert_eq!(job_id, Some(42));
+
+        // Absent means "no chain assigned one", not zero — a coordinator that
+        // defaulted to 0 would sign under an id `submitJob` never issues.
+        let local = Cli::try_parse_from([
+            "node",
+            "coordinator",
+            "--worker",
+            "127.0.0.1:8081",
+            "--registered-worker",
+            "0x0000000000000000000000000000000000000001",
+            "--server-key",
+            "keys/server.key",
+            "--bytecode",
+            "build/tally.bytecode",
+            "--function",
+            "tally4_select",
+            "--input",
+            "build/input-0.ct",
+        ])
+        .unwrap();
+        let Role::Coordinator { job_id, .. } = local.role else {
+            panic!("parsed as the wrong role");
+        };
+        assert_eq!(job_id, None, "no chain, no id");
     }
 
     #[test]

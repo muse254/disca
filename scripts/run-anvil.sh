@@ -564,6 +564,17 @@ if [ "$NETWORK" = real ]; then
     attestation_flags=(--attestations "$work/attestations.json")
   fi
 
+  # And the id the *chain* assigned, which is the other half. A worker signs a
+  # digest binding the job id, and `fulfillJob` rebuilds that digest from the id
+  # `submitJob` returned. A coordinator minting its own produces signatures that
+  # recover to addresses the registry has never seen, so the contract rejects a
+  # settlement that is correct in every other respect — and rejects it as
+  # `NotRegisteredWorker`, for workers that are registered. Probed for the same
+  # reason as above.
+  if "$NODE" coordinator --help 2>&1 | grep -q -- '--job-id'; then
+    attestation_flags+=(--job-id "$JOB_ID")
+  fi
+
   run_coordinator() {
     local quorum=$1 log=$2
     shift 2

@@ -100,6 +100,20 @@ pub struct Config {
     /// Where to write the result blob once the job settles. The coordinator
     /// cannot decrypt it; `disca-cli decrypt` can.
     pub result_out: Option<PathBuf>,
+    /// The job id to run under, when a chain has already assigned one.
+    ///
+    /// `None` mints one locally, which is right for a run with no chain. It is
+    /// wrong the moment there *is* one: a worker signs a digest binding the job
+    /// id, and `fulfillJob` rebuilds that digest from the id `submitJob`
+    /// assigned. Two different ids means signatures that recover to nothing the
+    /// registry knows, and the contract rejects a settlement that is in every
+    /// other respect correct — `NotRegisteredWorker`, for a worker that is
+    /// registered.
+    ///
+    /// That is not hypothetical: it is what `scripts/run-anvil.sh` hit, and why
+    /// it settles from a fixture rather than from the coordinator. Task 2.9f is
+    /// this flag being supplied by the watcher instead of by a shell script.
+    pub job_id: Option<u64>,
     /// Where to write the winning group's signatures, in the shape
     /// `fulfillJob` takes. See [`attestations_json`].
     ///
@@ -709,10 +723,9 @@ pub fn run(config: Config) -> Result<(), String> {
 
     let started = Instant::now();
     let job_id = coordinator.accept_job(JobSpec {
-        // No chain to take an id from yet, so this run mints one. Task 3.4
-        // passes the id `submitJob` assigned instead, and that substitution is
-        // the whole of the change (`bridge.md` §2, task 2.9f).
-        job_id: None,
+        // Supplied when a chain has already assigned one, minted otherwise.
+        // Task 3.4 is the watcher passing it rather than a caller.
+        job_id: config.job_id,
         workers: config.workers,
         registry: config.registry,
         attesters: config.attesters,
