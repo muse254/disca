@@ -32,8 +32,34 @@ Gas sketch for a 3-input job (L1 constants; cheaper on L2):
 - Commitments in storage: 3 x 32 B slots = ~60k gas
 - `fulfillJob` (result hash + attester signatures + compressed result blob
   **11.8 KB**, paid once as calldata at ~16 gas/byte and once as event data at
-  ~8 gas/byte): order 250-350k gas. The signatures add ~10k of that for a 3-of-N
-  job — 65 bytes and one `ecrecover` (~3k gas) each — which is what §2b is about
+  ~8 gas/byte): **354k gas measured** for the demo's 2-of-3 shape, 361k for
+  3-of-N. See the table below — the figures in this section were arithmetic
+  until `bridge/test/FulfillGas.t.sol` measured them, and the arithmetic was
+  low. The signatures are ~22k of that for a 3-of-N job, not the ~10k this
+  section used to claim; §2b has the breakdown
+
+**Measured, not derived.** solc 0.8.26, optimizer at 1000 runs, an 11.8 KB
+result blob, three input commitments, totals including the 21,000 intrinsic
+(`bridge/test/FulfillGas.t.sol`):
+
+| attesters | execution | total (Cancun) | total (Prague, EIP-7623) |
+|---|---|---|---|
+| 1 | 129,962 | 346,806 | 510,610 |
+| 2 | 136,369 | **354,377** | 513,520 |
+| 3 | 142,251 | 361,411 | 516,400 |
+| 5 | 155,255 | 376,743 | 522,220 |
+
+**The Cancun column is not what mainnet charges today.** EIP-7623 (Prague)
+floors calldata-heavy transactions at 10 gas per token, and a non-zero byte is
+four tokens. `fulfillJob` is precisely that shape — a 12 KB blob and almost no
+computation — so the floor binds at every attester count, and the real cost is
+**~510-522k**. Note what else that means: under the floor the attester count
+barely moves the total, because the transaction is paying for its bytes rather
+than its work. Every "order 250-350k" in this document predates that
+measurement and should be read as pre-Pectra.
+
+`architecture.md` §7 targets Anvil and an L2, where this is affordable either
+way. It is stated here so nobody sizes an L1 deployment from the old number.
 
 The result blob dominates, and it is 5x larger than an input blob: a freshly
 encrypted ciphertext compresses to a replayable PRNG seed, whereas a computed
@@ -74,14 +100,32 @@ interface IDiscaBridge {
     /// One worker's signature over the claim in §2a. `v` is 27 or 28.
     struct Attestation { bytes32 r; bytes32 s; uint8 v; }
 
-    /// Callable by the coordinator once >= attestersRequired workers have each
-    /// SIGNED for the same resultHash. Releases escrow, callbacks the consumer.
+    /// Callable by the registered coordinator once >= attestersRequired workers
+    /// have each SIGNED for the same resultHash. Releases escrow, callbacks the
+    /// consumer.
     ///
     /// The caller supplies signatures, not addresses: the contract recovers
     /// each signer itself. See §2a for what it must check.
+    ///
+    /// Gated on an owner-set coordinator address. That is about *payment*, not
+    /// about trust: §2a makes an attestation valid because of who signed it,
+    /// not who relayed it, so a stranger submitting a genuine result would be
+    /// harmless to correctness. It would not be harmless to the escrow — the
+    /// calldata sits in the mempool where anyone can copy it, resubmit it, and
+    /// collect the coordinator's fee. Left permissionless this is a free
+    /// front-run on every settlement.
     function fulfillJob(uint256 jobId, bytes32 resultHash, bytes resultBlob,
                         Attestation[] attestations) external;
 
+    /// Refunds the poster once the job's deadline passes unfulfilled.
+    ///
+    /// The timeout is a per-deployment immutable rather than a per-job
+    /// parameter. A poster choosing their own would choose zero, making every
+    /// job refundable before a worker has finished evaluating — FHE is seconds
+    /// of work, and nothing on-chain can tell "too slow" from "not started".
+    ///
+    /// Fulfilment after the deadline is refused, so settlement is not a race
+    /// between the coordinator and the poster over the same escrow.
     function refundOnTimeout(uint256 jobId) external;
 
     // --- events ---
@@ -124,8 +168,8 @@ Design notes:
   a fabricated set: the workers signed nothing, and the key holder cannot tell a
   wrong plaintext from a right one. **`fulfillJob` must not be implemented
   against this signature.** Workers need signing keys and the contract needs to
-  `ecrecover` each attestation (task 2.10i); the cost is roughly 3.5k gas per
-  attester against a 250-350k transaction, which reverses the reasoning in
+  `ecrecover` each attestation (task 2.10i); the measured cost is 7.0-7.7k gas
+  per attester against a 354k transaction, which reverses the reasoning in
   architecture.md §11 Q3.
 
 ## 2a. What a worker signs, and what the contract must check
@@ -222,10 +266,20 @@ worth paying for. So the failure is silent and permanent. That is a strictly
 worse property than having no attestation field at all, which would at least be
 honest about what is being trusted.
 
-The cost of fixing it is one `ecrecover` (~3,000 gas) plus 65 bytes of calldata
-per attester — order 10k gas for a 3-of-N job, against the ~250-350k `fulfillJob`
-already costs for the result blob. The "cheaper" option was cheaper by about 3%,
-in exchange for the property the contract exists to provide.
+The measured cost of fixing it is **7.0-7.7k gas per attester** — about 22k for
+a 3-of-N job against the 361k `fulfillJob` costs in total. Two corrections to
+the estimate this paragraph used to carry, both found by measuring:
+
+- It counted `ecrecover` at 3,000 gas and stopped. Each attestation also costs
+  a **cold `isRegisteredWorker` SLOAD (2,100 gas)**, which is most of the gap
+  between the estimated 3.5k and the measured 7k.
+- "65 bytes per attester" is the signature's size, not its size *on the wire*.
+  An `Attestation` inside a dynamic array ABI-encodes as three 32-byte
+  words — **96 bytes**, 31 of them zero padding around `v`.
+
+So the address-list design was cheaper by about **6%**, not 3%, in exchange for
+the only property the contract exists to provide. The conclusion is unchanged
+and reads better for being twice the price.
 
 ## 3. Key lifecycle
 
@@ -351,7 +405,9 @@ On the Anvil and L2 targets in §7 that is zero or cents, and on L1 it keeps
 **The constraint to watch: 11.8 KB is the cost of a single `i32` result.**
 Results are compressed ciphertexts, so calldata grows linearly with the number
 of output values. A job returning ten values would carry ~118 KB, which is not
-an ordinary transaction on any chain. B holds while results stay small; it is
+an ordinary transaction on any chain — and under EIP-7623 it is worse than the
+byte count suggests: ~118 KB of mostly non-zero calldata is roughly **4.8M gas
+of floor alone**, before any execution. B holds while results stay small; it is
 not a design that scales to large outputs.
 
 If that changes — multi-value results, ranked outputs, anything beyond a handful
@@ -370,7 +426,7 @@ The three options in one line each:
 | | Contract can verify blob | Escrow release atomic with availability | `fulfillJob` gas |
 |---|---|---|---|
 | A | no | no | ~70-120k |
-| B (current) | yes | yes | ~250-350k |
+| B (current) | yes | yes | **354k measured** (510k under EIP-7623) |
 | C | no (key holder can) | no | ~70-120k |
 
 **Consequence for §1:** emitting the compressed result on-chain is now
@@ -383,10 +439,11 @@ emitted.
 | Failure | Handling (demo) |
 |---|---|
 | Coordinator goes silent | `refundOnTimeout` returns escrow |
-| Worker hash mismatch | Job marked Disputed; escrow refunded; off-chain rerun |
+| Worker hash mismatch | **Collapses onto the row above.** Divergence is invisible on-chain: a worker that disagrees simply does not contribute to a quorum, so the job never reaches `fulfillJob` and expires into `refundOnTimeout`. `JobState.Disputed` is kept in the enum and nothing sets it — the contract has no way to learn that a mismatch happened rather than a worker being slow |
 | Malformed input blob | Coordinator rejects pre-dispatch; commitment check on-chain prevents substitution |
 | Key holder loses client key | Result undecryptable by design; documented, not "handled" |
 | Result withheld by coordinator | Key holder cannot decrypt - same path as coordinator silence (refund); ciphertext availability via event emission mitigates |
+| Consumer callback reverts | Settlement reverts with it and the job refunds on timeout. Swallowing the revert would release escrow while the paying contract believes nothing happened, which is the worse of the two failures |
 
 ## 7. Chain targets
 

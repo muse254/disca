@@ -37,11 +37,15 @@ Cheap, and unblocks estimating everything downstream.
 - [x] **0.4 Speed up the test loop.** Done: `[profile.dev.package."*"]` and
       `[profile.test.package."*"]` at `opt-level = 3` in the root manifest.
       Test suite went from **464.70 s to 4.70 s**.
-- [ ] **0.5 Decide the open questions** in architecture.md §11 (3: attester
-      scheme, 4: transport, 5: chain target). The doc already leans address-list
-      / HTTP / Anvil — just confirm and strike them. Q1 (circuit size) is now
-      answered by 0.2; Q2 (server key distribution) is easier than assumed —
-      the compressed server key is 28.8 MB, not 114.8 MB.
+- [ ] **0.5 Decide the open questions** in architecture.md §11. Q1 (circuit
+      size) answered by 0.2. Q2 (server key distribution) easier than assumed —
+      the compressed key is 28.8 MB, not 114.8 MB. **Q3 (attester scheme) is
+      settled, and settled *against* the doc's leaning**: signatures, not an
+      address list, because an address list the coordinator supplies is not
+      something a contract can check (2.10i, bridge.md §2b). The measured cost
+      is 7.0-7.7k gas per attester on a 354k transaction — the leaning rested on
+      signatures being expensive, and they are not. Q4 (HTTP) and Q5 (Anvil)
+      still want confirming and striking.
 
 ## Track 1 — Execution core (`primitives/`)
 
@@ -160,9 +164,12 @@ involved.
 ### 2.4 Coordinator
 
 - [x] Serve `POST /results` (worker reports).
-- [ ] `GET /result/<jobId>` for the key holder. Deferred: the coordinator still
-      stands in for the key holder (`KeyHolder` in `coordinator.rs`), so there
-      is nobody to serve yet. Needed when they split in Track 3.
+- [ ] `GET /result/<jobId>` for the key holder. **No longer blocked** — the
+      reason it was deferred was that the coordinator *was* the key holder, and
+      task 4.3 split them: `disca-cli` holds the client key and never talks to a
+      worker. The coordinator writes the winning blob to `--result` today, which
+      is enough for a local run and not enough for a key holder on another
+      machine.
 - [x] Dispatch a job to N workers concurrently.
 - [x] Collect reports until M agree on an attestation hash, or the deadline
       passes.
@@ -227,9 +234,11 @@ involved.
       the deliberate alternative rather than deleted (the research paper describes
       that approach and this is its only implementation). Its truth-table tests
       were ~7.3 s of the primitives suite, about a third, guarding unused code.
-- [ ] **2.11b Build with `--all-features` in CI.** `boolean-circuits` is not
+- [x] **2.11b Build with `--all-features` in CI.** `boolean-circuits` is not
       compiled by an ordinary build, so nothing type-checks it and it will rot.
-- [ ] **2.11c Implement `disca-cli parse` (see 4.3).** It now exits 2 with a
+- [x] **2.11c Implement `disca-cli parse` (see 4.3).** Done as `compile`, which
+      lowers wasm and validates every function before writing bytecode. The stub
+      it replaced exited 2 with a
       pointer to the `inspect` example instead of accepting a file, doing
       nothing, and reporting success.
 
@@ -244,7 +253,7 @@ numerically-equivalent algorithms and round a few coefficients differently.
 to 6 of 6. Full write-up in architecture.md §3.
 
 - [x] **2.10a Pin the FFT plan at node startup**, before anything touches a key.
-- [ ] **2.10i Sign attestations per worker. Blocks all of Track 3.** Attestations
+- [x] **2.10i Sign attestations per worker. Blocks all of Track 3.** Attestations
       are unsigned: a `SealedResult` is a blob and `keccak256(blob)`, computable
       by anyone. The coordinator supplies the attester list to `fulfillJob`, so
       the contract can check only that the addresses are registered and distinct
@@ -323,17 +332,60 @@ to 6 of 6. Full write-up in architecture.md §3.
       machines with different core counts. Not reproduced on our circuit shape;
       confirm it cannot bite before relying on cross-machine agreement.
 
+## Track 2c — Formal specification (`spec/`)
+
+Not on the original list. It exists because the paper claimed "a formal
+verification proof for the distributed computer" and there was none; rather than
+only delete the claim, the thing it would have to rest on got built.
+
+- [x] **2c.1 TLA+ model of M-of-N attestation and settlement.**
+      `spec/DiscaAttestation.tla`, 30 TLC configurations, ~45 s. Checks
+      `QuorumIsReal`, `EscrowPaidOnce`, `NoSettleOnSplit`, `VoteNotDisplaced`,
+      `SomeoneActuallyEvaluated` and liveness. Half the configurations are
+      counterexamples that are *supposed* to violate a named invariant, and
+      `check.sh` fails if one stops finding its counterexample — a spec that
+      only checks "no errors" cannot tell a proof from a model that stopped
+      modelling anything.
+- [x] **2c.2 Two findings, both fixed.** A minority quorum could settle during
+      the straggler grace before honest workers reported (`MC_GraceRace_N4M2`);
+      `2M > N` is now required at startup. And a constant `job_id` made
+      attestations interchangeable between runs, so replays could *pre-empt*
+      every honest worker rather than displace them — first-write-wins does not
+      help against arriving first (`MC_ReplayPreempt_N3M2`); job ids are now
+      per-run.
+- [x] **2c.3 Pin the model to the code it describes.** `spec/models.toml` hashes
+      each modelled function; `make -C spec drift` fails when one changes and
+      names what the spec uses it for. Runs in CI before TLC, because the
+      failure it catches is the one TLC structurally cannot: a model that is
+      internally consistent and externally wrong.
+- [ ] **2c.4 Bind the input commitments into the signed digest.** `Claim::preimage`
+      binds job id, bytecode hash and result hash but not the inputs. With
+      per-run job ids that is currently sound, since the id identifies the input
+      set — but the soundness is incidental rather than stated, and it breaks
+      quietly the moment an id becomes predictable or shared.
+- [ ] **2c.5 The model is single-job, N ≤ 4, and unverified against the Rust.**
+      There is no extraction or refinement: the correspondence is a careful
+      reading, and 2c.3 is a tripwire rather than a proof of it. Concurrent
+      jobs, multiple chain ids, registration and gas are not modelled.
+
 ## Track 3 — Bridge (`bridge/`, new Foundry project) — needs 0.3
 
-- [ ] **3.1 Foundry scaffold** + `DiscaBridge.sol`: program registry, worker
+- [x] **3.1 Foundry scaffold** + `DiscaBridge.sol`: program registry, worker
       registry, job escrow, lifecycle, events (bridge.md §2).
-- [ ] **3.2 Forge unit tests** for the job state machine and the M-of-N
+- [x] **3.2 Forge unit tests** for the job state machine and the M-of-N
       attester check.
 - [ ] **3.3 Anvil end-to-end** with a mocked coordinator calling `fulfillJob`.
 - [ ] **3.4 Alloy chain watcher** in the coordinator role — subscribe to
       `JobRequested`, validate blob commitments, dispatch, submit `fulfillJob`.
       Adds `alloy` as the first non-tfhe dependency.
-- [ ] **3.5 `refundOnTimeout` + disputed-job path** (bridge.md §6).
+- [x] **3.5 `refundOnTimeout`** — done, with the deadline a per-deployment
+      immutable and fulfilment after it refused, so settlement is not a race
+      between coordinator and poster over one escrow. **The disputed-job path is
+      not pending, it is unreachable**: divergence is invisible on-chain, so a
+      disagreeing worker simply fails to contribute to a quorum and the job
+      expires into a refund. `JobState.Disputed` exists and nothing sets it.
+      bridge.md §6 row 2 now says so rather than describing a path that cannot
+      be taken.
 
 ## Track 4 — Demo + submission — needs 1.1
 
@@ -343,8 +395,8 @@ to 6 of 6. Full write-up in architecture.md §3.
       Findings are in architecture.md §2a: release builds are required (debug
       output is rejected), and fixed-size loops unroll cleanly.
       `primitives/examples/inspect.rs` dumps a module's lowered opcodes.
-- [ ] **4.2 `CommitteeTally.sol`** consumer contract (bridge.md §5).
-- [ ] **4.3 `disca-cli` for real** — `parse` is a no-op (`main.rs:29`) and
+- [x] **4.2 `CommitteeTally.sol`** consumer contract (bridge.md §5).
+- [x] **4.3 `disca-cli` for real** — `parse` is a no-op (`main.rs:29`) and
       `parser.rs:3` is `todo!()`. Needs at minimum: wasm → bytecode + hash, and
       `keygen`.
 - [ ] **4.4 End-to-end demo script** driving register → submit → evaluate →
