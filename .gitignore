@@ -17,3 +17,6 @@ whitepaper/*.pdf
 
 # Python bytecode from scripts/lib
 __pycache__/
+
+# Agent worktrees. Ephemeral, and each is its own checkout of this repo.
+.claude/
