@@ -23,3 +23,6 @@ __pycache__/
 bridge/out/
 bridge/cache/
 bridge/broadcast/
+
+# Agent worktrees. Ephemeral, and each is its own checkout of this repo.
+.claude/

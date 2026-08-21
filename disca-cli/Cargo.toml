@@ -9,5 +9,12 @@ homepage.workspace = true
 [dependencies]
 anyhow = "1.0.100"
 clap = { workspace = true, features = ["derive", "cargo"] }
-wasmparser.workspace = true
-wast.workspace = true
+primitives = { path = "../primitives" }
+tfhe = { workspace = true }
+
+[dev-dependencies]
+# Only the tests need to turn `.wat` into a `.wasm` file: `compile` takes a
+# binary module, and a fixture written as text is one that can be read in the
+# diff. The production path parses wasm through `primitives`, which owns
+# `wasmparser` -- this crate no longer needs a parser of its own.
+wast = { workspace = true }
