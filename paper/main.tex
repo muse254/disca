@@ -76,8 +76,8 @@ This is a very useful abstraction that can be applied to a scenario like running
 
 In this work, we outline DISCA as a standard for logic and data privacy for computations.
 DISCA operates as a distributed computer with its own protocol, designed through a VM that uses FHE with the aspirational goal of low barrier of entry and ubiquitous deployment on diverse devices including smartphones, though current computational requirements limit practical deployment on resource-constrained devices.
-Its design is proposed and we analyze security properties from a simple prototype.
-Lastly, we create a formal verification proof for the distributed computer.
+Its design is proposed and we analyze security properties from a working prototype, reporting measured rather than asymptotic costs throughout.
+Lastly, we state precisely what the system's verification establishes, what it costs, and what it does not establish.
 \end{minipage}
 \end{abstract}
 
@@ -124,8 +124,10 @@ DISCA operates as an independent distributed computing system where nodes partic
 The system consists of nodes that communicate using DISCA's own protocol, operating as a distributed computer with no dependence on blockchain, smart contracts, or any other prior protocol infrastructure.
 DISCA is designed with the aspirational goal of low barrier of entry, enabling nodes to eventually run on diverse devices including smartphones, making ubiquitous deployment a long-term objective of the system, though current computational requirements limit practical deployment on resource-constrained devices.
 
-DISCA implements its own networking layer for peer-to-peer communication, network discovery, and message routing.
-This independent networking implementation allows DISCA to operate as a self-contained distributed computer focused on computation through a VM that uses FHE, without dependencies on external protocols or infrastructure.
+DISCA carries its own protocol rather than borrowing one.
+What is built today is deliberately modest: a coordinator dispatches a job over HTTP with binary-encoded bodies to nodes that evaluate it and report back, and no node talks to another.
+Peer-to-peer discovery and message routing are the intended shape and are not implemented.
+Nothing in the verification design below depends on them, because replication needs a party that fans a job out and counts the replies, not a mesh.
 
 \subsection{Circuit Design}
 
@@ -257,7 +259,7 @@ The IR fixes what a program means; it does not fix how each instruction is evalu
 Two routes were available, and the choice between them shapes both performance and what programs can express.
 
 \textbf{Gate composition.} Each integer operation is decomposed into boolean gates over single encrypted bits: an addition becomes a chain of full adders, each built from \texttt{XOR} and \texttt{AND} over one-bit ciphertexts.
-This is the classical boolean-circuit view of FHE, and it is the route we implemented first.
+This is the classical boolean-circuit view of FHE, it is what Section 2.1 has in mind when it speaks of a stack operation translating into gates, and it is the route we implemented first.
 
 \textbf{Native integer operations.} The evaluation library exposes arithmetic and comparison directly on encrypted integers held in a radix representation, and performs the gate-level work internally.
 
@@ -277,8 +279,11 @@ A 32-bit ripple-carry adder is thirty-two chained full adders, on the order of o
 \textbf{One bit through gate composition therefore costs more than thirty-two bits through the integer interface.}
 The radix representation batches and parallelises work that a carry chain serialises.
 
-DISCA evaluates through the integer interface.
-The gate implementation is retained as a documented reference rather than deleted, since it remains the starting point for bit-level operations the integer interface does not expose, but it is not compiled into any binary.
+\textbf{What is built is the integer interface.}
+It is worth being explicit about the gap between the two paragraphs above, because they are not equal partners.
+The evaluator calls the integer interface and nothing else.
+The gate implementation survives behind an off-by-default compilation feature with no callers anywhere in the system: it is not linked into any binary, it is not reached by an ordinary build, and it exists as the documented alternative---and as the starting point for bit-level operations the integer interface does not expose---rather than as a second evaluation path a deployment could select.
+Wherever this paper describes a circuit as a network of gates, it is describing the route not taken.
 
 The consequence for the IR is direct: each instruction maps to one homomorphic operation rather than to a gate network.
 Measured costs of the operations the instruction set uses:
@@ -297,6 +302,49 @@ Selection & 200 ms \\
 
 Multiplication costs roughly nine times an addition.
 Circuit shape therefore dominates: choosing an algorithm that compares and selects rather than multiplies is worth more than any tuning of the evaluator, which spends effectively all of its time inside these operations.
+A comparison and a selection together cost about 341 ms, so a tally that picks the largest of $N$ candidates---$N - 1$ such pairs---runs in roughly $(N-1) \times 0.34$ seconds.
+Sixteen candidates is about five seconds of evaluation, which is why circuit size is not the binding constraint on anything demonstrated here.
+
+Every figure above is from an optimised build, and the qualifier is not decorative.
+The same operations built without optimisation run 87 to 98 times slower: an addition takes 22 seconds instead of 225 milliseconds, a multiplication 178 seconds instead of 2.04.
+The difference is large enough to change which programs are worth writing, so a measurement taken from an unoptimised build is not a conservative estimate of anything.
+
+\subsection{The Size of the Things Being Moved}
+
+Latency is the cost that gets quoted; size is the cost that decides the architecture.
+Measured as wire-serialised bytes against the same implementation and parameters:
+
+\begin{center}
+\begin{tabular}{lr}
+\hline
+Client key (secret; never transmitted) & 23.5 KB \\
+Server key (evaluation key) & 114.8 MB \\
+Server key, compressed & 28.8 MB \\
+Public key, for public-key encryption mode & 2.00 GB \\
+Working 32-bit ciphertext, decompressed & 257.9 KB \\
+Freshly encrypted 32-bit ciphertext, compressed & 2.3 KB \\
+\textit{Computed} 32-bit result, compressed & 11.8 KB \\
+Key generation & 685 ms \\
+\hline
+\end{tabular}
+\end{center}
+
+Three of these rows carry a design decision each.
+
+The evaluation key is 114.8 MB, or 28.8 MB compressed, and every node needs it before it can evaluate anything.
+It is too large to publish anywhere that charges per byte, so it is distributed out of band and pinned by its hash---a node fetches it once, checks the hash, and caches it.
+This is also the row that keeps the ambition of running on a phone aspirational rather than current: the barrier is not the evaluation, it is the 28.8 MB of key material that has to arrive first.
+
+The public key for public-key encryption mode is 2.00 GB, which is not a large number so much as a disqualifying one.
+Encryption is therefore done with the secret key, and a program has one key holder.
+Inputs from parties who do not trust each other need multi-key or threshold FHE, and that is future work rather than a configuration option.
+
+A computed result compresses about five times worse than a fresh encryption---11.8 KB against 2.3 KB---and the reason is worth stating because it is not obvious.
+A freshly encrypted ciphertext compresses to a seed for the generator that produced its random part, so the bulk of it is replayable rather than stored.
+A result that has been through the evaluator has no such seed and must carry real coefficients.
+Anything that publishes results therefore budgets for the larger number, and budgets for it per output value.
+
+Key generation at 685 ms is cheap enough to do per program at registration time and forget about.
 
 \subsection{Constraints on Expressible Programs}
 
@@ -352,6 +400,62 @@ No node was told what to produce and none communicated with the others; A and B 
 Raising the threshold to three makes the same job fail: unanimity is unreachable while one node disagrees, and the correct outcome is no result rather than a result two nodes vouch for and a third contradicts.
 That is the trade in the other direction---a stricter threshold buys confidence at the cost of tolerating nothing.
 
+\subsubsection{An Unsigned Hash Is Evidence to Nobody}
+
+The three lines above are how the mechanism was first built, and taken literally they are all it produced: a node's attestation was \texttt{keccak256} of its compressed result and nothing else.
+Unsigned, unbound to a job, unbound to the node that computed it.
+
+That is sufficient exactly as long as the party counting the agreement is also the party that dispatched the work.
+The coordinator knows which reply arrived on which connection, so it can attribute a hash even though the hash attributes nothing.
+It stops being sufficient the moment anyone else is the audience.
+Handed the same three lines, a third party cannot tell whether three nodes produced them or one party wrote them down, because a hash of a ciphertext is computable by anyone holding the ciphertext.
+Nor does anything downstream contradict a fabricated count: the key holder decrypts whatever it is given and obtains an integer, and a wrong ciphertext yields a wrong integer just as cleanly as a right one yields a right one.
+
+The consequence is worth stating sharply, because a mechanism that looks like verification and is not is worse than an absent one.
+Agreement counted over unsigned hashes is verifiable only by the party doing the counting.
+Presenting it to anyone else is asking them to trust the counter, which is the thing replication was supposed to remove.
+
+\subsubsection{What a Node Signs}
+
+Nodes therefore sign, and the signature is what a party that dispatched nothing can check.
+
+Each node holds a secp256k1 key, and its identity is the Ethereum address derived from that key---the last twenty bytes of \texttt{keccak256} over the uncompressed public key, exactly as an ordinary account address is derived.
+Choosing that derivation rather than an arbitrary node identifier means the identity a node attests under is the identity a registry can hold, with no mapping table between them.
+
+What a node signs is not the result hash but a claim containing it.
+Every field is fixed-width, so concatenation is injective and no length prefixes or delimiters are needed:
+
+\begin{verbatim}
+offset  len  field
+     0   22  "DISCA/attest/result/v1"      ASCII domain tag
+    22    8  job id                        big-endian uint64
+    30   32  keccak256(bytecode)           which program
+    62   32  keccak256(compressed result)  what it produced
+    94       total
+\end{verbatim}
+
+The signed digest is \texttt{keccak256} of that preimage, hashed once more under the EIP-191 prefix for a 32-byte payload.
+
+Two choices in that layout are load-bearing.
+Binding the job and the program is what stops a signature being lifted: a deterministic evaluator over a small answer space produces the same result bytes for many different jobs, so a signature over a bare result hash would be a valid attestation for every one of them.
+The EIP-191 prefix places the digest outside the space of encoded transactions, so a node's key cannot be induced to sign a transfer by being shown something that looks like an attestation, and an operator can keep the key behind an ordinary wallet, hardware module or key-management interface rather than one that signs raw digests.
+The claim binds neither a chain identifier nor a verifying contract address, which is what a typed-data scheme would add and what would prevent an attestation minted for one deployment being replayed against another; neither value exists yet, and the version suffix in the tag is how that migration is made loud rather than silent.
+
+A verifier now recovers the signing address from each signature and counts agreement over \emph{distinct registered addresses}.
+That is a single elliptic-curve recovery per attestation and a membership check, which is precisely what a smart contract performs with \texttt{ecrecover}, and it is why the count survives leaving the coordinator's process.
+Note what recovery does \emph{not} establish: that the bridge, or the coordinator, ever asked this node for this job.
+It never needs to.
+An attestation counts because of who signed it, not because of who was asked.
+
+Failure reports are signed under a second tag of identical length differing in one word, with the hash of the reason occupying the result slot.
+A failure never counts towards a threshold---a node that could not evaluate has attested to nothing---but an unsigned failure would let anyone able to reach the coordinator manufacture evidence against an honest operator, which matters as soon as registration or reputation depends on who failed.
+
+What signing does not buy is any assurance that the signer evaluated anything.
+A node can sign a wrong answer, and that is exactly what the threshold is for.
+What it buys is that a disagreement now carries a name that nobody else could have written.
+
+\subsubsection{Two Mechanisms Share the Name}
+
 Two unrelated mechanisms share this notation, and the distinction matters because DISCA's roadmap uses the second:
 
 \begin{center}
@@ -368,7 +472,7 @@ Instances & Modular redundancy, & Secret sharing, \\
 \end{tabular}
 \end{center}
 
-Threshold decryption, discussed later as future work, is the second kind.
+Threshold decryption---the answer Section 2.3 defers to for inputs from mutually distrusting parties---is the second kind.
 It would remove the single key holder so that no individual party can decrypt, and it says nothing whatever about whether a node evaluated correctly.
 It is not an upgrade path from replication; a system with threshold decryption still requires a correctness mechanism alongside it.
 
@@ -380,6 +484,8 @@ Comparing results by hash makes this requirement exact: two honest nodes evaluat
 This does not hold automatically, and the reason is instructive.
 Evaluation libraries select among numerically equivalent Fast Fourier Transform algorithms by benchmarking them at first use and caching the winner for the lifetime of the process.
 The winner therefore depends on machine load at that instant.
+The caching is what makes this hard to find rather than merely surprising: a process is self-consistent forever, so a determinism test that evaluates twice inside one process passes, and only separate processes disagree.
+It also means a whole round of nodes started together can drift together, since they benchmark under the same contention---which reads as a stable, correct system that has quietly changed its answer between rounds.
 Those algorithms compute the same transform but group their constituent operations differently, and floating-point addition is not associative because every operation rounds.
 A coefficient near a rounding boundary consequently lands one unit either side depending on the ordering.
 
@@ -432,9 +538,11 @@ The requirement has a security counterpart in the literature.
 Smart and Walter~\cite{deterministic_tfhe} show that the standard security notion for FHE under a decryption oracle ordinarily calls for a \emph{randomised} evaluation procedure, and that this randomisation can be removed for TFHE in the random oracle model.
 Deterministic evaluation is therefore something a deployment may legitimately want and something the theory can accommodate; the divergence described above is a separate, purely implementational matter, since no randomness is involved in it at all.
 
-Byte equality is therefore conditional, and the conditions belong in node registration rather than in documentation.
-Nodes must share a processor architecture, since implementations differ between instruction sets; must fix the transform selection identically; and must evaluate on the same class of hardware, since accelerated backends select parameters that are not reproducible at all.
-A node violating any of these disagrees with honest nodes while behaving honestly.
+Byte equality is therefore conditional, and it is worth listing the conditions in full, because each of them is a way for an honest node to be indistinguishable from a dishonest one.
+Two nodes produce identical bytes when they share a processor architecture, since implementations differ between instruction sets and the same library is documented to differ between x86 and ARM; run the same version of the evaluation library; use the same parameter set, since the transform is pinned per polynomial size and changing parameters changes the size; evaluate on a CPU rather than an accelerator, since accelerated backends are not byte-reproducible at all; and fix the transform selection identically, which is a single call that must be made before anything touches a key, because decompressing an evaluation key is itself enough to settle the choice.
+
+None of these is a property a node can be trusted to report, and none of them needs to be: a node that lies about its class simply disagrees and is outvoted, exactly as a dishonest one is.
+They belong in registration so that a set of nodes which could never have agreed is refused as a set, rather than surfacing later as an unexplained failure to reach a threshold.
 Until registration enforces them, \textbf{disagreement is evidence of divergence rather than of dishonesty}, and cannot support penalties.
 
 \subsection{Verification Ladder}
@@ -454,11 +562,56 @@ L2 & Proof of correct evaluation & Computation, always \\
 \end{center}
 
 The comparison step at L0 is essentially free: hashing and comparing a result costs approximately 48 microseconds against a job of roughly three seconds, or 0.002 percent.
+Recovering a signer adds one elliptic-curve operation per attestation, which is negligible beside the same three seconds and costs roughly three thousand gas when a contract performs it---against a settlement transaction already dominated by the 11.8 KB result.
 The entire cost of the mechanism is the replication itself, $N$ times the computation.
 
 L0's limitation is that it verifies agreement rather than computation.
 It cannot distinguish a dishonest node from a misconfigured one, which is why the homogeneity requirements above are load-bearing.
 L1 and L2 verify the computation itself, and would additionally remove those requirements, since a challenger re-executing or a proof verifying does not depend on two machines producing identical bytes.
+
+\subsection{L0 Admits No Permissionless Node Set}
+
+That limitation has a consequence sharp enough to be worth stating on its own, because the shape of the system invites the opposite assumption.
+A coordinator fanning a job out to nodes that vote on the answer looks like an oracle network, and oracle networks are usually open.
+DISCA's is not, and \textbf{this is not a matter of ``not yet''}.
+
+Replicate-and-vote over exact bytes is definitionally a closed, homogeneous fleet.
+The mechanism accepts a result because independent machines produced the same bytes, and machines produce the same bytes only when they are the same kind of machine, running the same version of the same library, under the same parameters, with the same transform selection.
+An open set is precisely a set containing machines that are none of those things.
+An honest node from outside the class is, at L0, indistinguishable from a dishonest node inside it---the coordinator sees a hash that does not match, and there is nothing further to look at.
+No amount of engineering closes that gap, because the gap is the mechanism.
+
+Registration therefore decides membership, membership is what a threshold counts over, and a node that cannot be shown to belong to the class cannot be counted.
+The signatures of Section 3.1 do not change this: they make an attestation attributable, not admissible.
+
+Opening the set requires a rung that verifies computation rather than counting agreement over bytes.
+L1 is one route---a challenger re-executes a disputed result---but on an open set a divergent honest node becomes a false accusation the protocol has to adjudicate rather than a silent minority it can outvote, so the challenge mechanism inherits work that L0 avoids by excluding the case.
+Adjudicating on the decrypted plaintext is the other; it is insensitive to which bytes carried the answer, costs roughly seven percent of a job, and in exchange puts the key holder on the critical path and gives up the ability to check a published ciphertext against what was attested.
+Both admit an open set. Neither is built.
+
+\section{Settlement: An Ethereum Adapter}
+
+DISCA is not a blockchain and depends on none, and everything above is complete without one.
+But a signed attestation is only worth more than an unsigned hash if some party other than the coordinator is counting, and a smart contract is the obvious such party---for a reason that is structural rather than fashionable.
+An Ethereum contract cannot keep a secret: its storage is public and its execution is repeated by every validator.
+A contract that wants a computation over data no validator may see has nowhere to put that data and no way to perform that computation.
+DISCA is a place to put it.
+
+The integration is an adapter at the edge, not a change to the execution core: a bridge contract and a chain watcher, with the IR, the evaluator and the attestation scheme untouched.
+A program is registered by its bytecode hash, an evaluation key by its hash; a job is posted with compressed input ciphertexts and an escrowed fee; the coordinator, watching for that event, dispatches to nodes, collects signed attestations and settles.
+The boundary follows from Section 2.3: commitments, metadata, escrow and attestations on-chain, keys and working ciphertexts off it.
+The evaluation key cannot go on-chain under any encoding, so it is pinned by hash and fetched out of band.
+
+Settlement is the part that needs care, and it is where the signatures earn their place.
+The contract reconstructs the signed preimage itself, from the job identifier it assigned and the bytecode hash it holds for that program---never from anything the submitter is free to vary---recovers a signer per attestation, and requires the recovered addresses to be distinct, registered, and at least as many as the threshold.
+It additionally requires that the result blob it publishes hash to the attested value, which is why the attestation covers the \emph{compressed} result: bytes that never leave a node commit to nothing any verifier could obtain, and would leave a coordinator free to publish a genuinely attested hash beside a substituted blob.
+
+What the contract does not do is verify a computation.
+It verifies that $M$ of $N$ registered nodes signed for the same result, which is a claim about agreement and inherits every condition of Section 3.2 that makes agreement mean anything.
+Publishing the result costs the 11.8 KB of Section 2.3, which keeps settlement inside the cost of an ordinary transaction for a single-value result and would not for ten of them.
+That is the constraint to watch: the design holds while results stay small.
+
+The bridge is specified and not built.
 
 \section{References}
 

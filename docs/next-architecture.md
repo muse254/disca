@@ -250,7 +250,7 @@ fleet. A permissionless set needs either L1 (challenge on re-execution, where a
 divergent honest worker is a false accusation you must adjudicate) or adjudicating
 on decrypted plaintext (`attestation.md` §5d, ~7% cost, puts the key holder on
 the critical path and gives up `bridge.md` §5a's on-chain verifiability). That is
-a positioning statement the whitepaper should carry, because a reader will
+a positioning statement the research paper should carry, because a reader will
 otherwise assume the oracle-network shape implies an open one.
 
 The concrete design consequence, and the reason to act now rather than at 2.10b's
@@ -296,9 +296,9 @@ registry file is proportionate and takes an afternoon.
 - **`logic_gates` behind a feature flag, kept alive by an `--all-features` CI job
   (2.11a, 2.11b).** 190 lines with no callers, an alternative implementation
   strategy the evaluator does not use, and ~7.3 s of truth-table tests. The
-  README's justification — the whitepaper describes that approach and this is its
+  README's justification — the research paper describes that approach and this is its
   only implementation — is real but is served just as well by git history and
-  PR #1. **Recommendation: delete it and cite the commit from the whitepaper.**
+  PR #1. **Recommendation: delete it and cite the commit from the research paper.**
   If it stays, do not let it gate CI; a build job for dead code is a maintenance
   tax paid to keep a number flattering. This is the maintainer's call and I would
   not spend long on it either way, but 2.11b as written is work in the wrong
@@ -410,7 +410,7 @@ Presented with a recommendation rather than neutrally, per the ground rules.
 2. **Delete `logic_gates` or keep it behind CI.** I recommend deleting. Low
    stakes either way; the reason to decide is that 2.11b is otherwise on the
    list as work.
-3. **Whether the whitepaper should say outright that L0 cannot be permissionless
+3. **Whether the research paper should say outright that L0 cannot be permissionless
    (§2.6).** I recommend yes, and early — it is a sharper and more defensible
    claim than leaving the reader to assume otherwise, and it motivates L1 on the
    ladder rather than making it look like polish.

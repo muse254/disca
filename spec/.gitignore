@@ -1,0 +1,10 @@
+# Somebody else's build output, 2.2 MB, fetched by check.sh and pinned by
+# checksum there. Committing a jar makes the repository a redistribution
+# point for a binary nobody in it built.
+tla2tools.jar
+
+# TLC output: full logs, counterexample traces, and its on-disk state queues.
+out/
+states/
+*.st
+*.fp
