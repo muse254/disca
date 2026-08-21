@@ -287,6 +287,47 @@ mod tests {
     }
 
     #[test]
+    fn force_replaces_the_key_file_rather_than_writing_through_it() {
+        // `--force` sanctions losing the old key, but the *mode* must not be
+        // inherited: the permission bits are applied when a file is created,
+        // so overwriting in place would silently keep whatever mode the
+        // previous file had. A key that started life as a 0644 placeholder
+        // would stay world-readable through every regeneration after it.
+        let dir = TempDir::new("keygen-force");
+        fs::create_dir_all(dir.path()).unwrap();
+        let client_key_path = dir.path().join(CLIENT_KEY_FILE);
+        fs::write(&client_key_path, b"a permissive placeholder").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&client_key_path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let keys = keygen(dir.path(), true).expect("force must replace it");
+
+        let written = fs::read(&keys.client_key_path).unwrap();
+        assert_ne!(written, b"a permissive placeholder", "it was replaced");
+        assert!(
+            wire::decode_client_key(&written).is_ok(),
+            "and replaced with a real key"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&keys.client_key_path)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "the replacement must not inherit the placeholder's mode"
+            );
+        }
+    }
+
+    #[test]
     fn a_key_written_by_one_run_decrypts_what_another_run_encrypted() {
         // The property that makes a multi-invocation key holder possible at
         // all. Nothing is held in memory between the two calls below: `encrypt`

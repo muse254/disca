@@ -102,6 +102,27 @@ mod tests {
     "#;
 
     #[test]
+    fn a_module_with_nothing_in_it_is_refused_rather_than_emitted() {
+        // An empty module lowers and serialises perfectly well -- it is a valid
+        // program with no functions -- so nothing downstream would object until
+        // a coordinator asked for a function name and got nothing. Failing here
+        // costs a millisecond; failing there costs a dispatch to every worker.
+        let dir = TempDir::new("compile-empty");
+        let input = dir.write("empty.wasm", &wasm("(module)"));
+        let output = dir.path().join("empty.bytecode");
+
+        let err = compile(&input, &output).expect_err("an empty module is not a program");
+        assert!(
+            err.to_string().contains(&input.display().to_string()),
+            "the error must name the module: {err}"
+        );
+        assert!(
+            !output.exists(),
+            "a refused compile must not leave a bytecode file behind"
+        );
+    }
+
+    #[test]
     fn a_compiled_module_is_bytecode_a_worker_would_accept() {
         let dir = TempDir::new("compile");
         let module = dir.write("max.wasm", &wasm(MAX));
