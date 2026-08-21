@@ -244,6 +244,38 @@ numerically-equivalent algorithms and round a few coefficients differently.
 to 6 of 6. Full write-up in architecture.md §3.
 
 - [x] **2.10a Pin the FFT plan at node startup**, before anything touches a key.
+- [ ] **2.10i Sign attestations per worker. Blocks all of Track 3.** Attestations
+      are unsigned: a `SealedResult` is a blob and `keccak256(blob)`, computable
+      by anyone. The coordinator supplies the attester list to `fulfillJob`, so
+      the contract can check only that the addresses are registered and distinct
+      — a dishonest coordinator can name any two registered workers beside any
+      result, and nothing contradicts it. The attestation tokens added in 2.9a
+      fix the equivalent hole *inside* the coordinator and are invisible to a
+      contract. Give workers secp256k1 keys and have the contract `ecrecover`
+      each attestation. Cost is ~3.5k gas per attester on a 250–350k
+      transaction, which reverses architecture.md §11 Q3's reasoning. The token
+      then becomes redundant and `/results` gets authentication free.
+
+      **Sign a digest, not the bare result hash.** `resultHash` is
+      `keccak256(blob)` and commits to no job, program or worker, so a signature
+      over it alone is replayable onto any other job with the same output — the
+      hole moves rather than closes. The signed digest must bind at least
+      `(domain, chainId, bridge, jobId, programId, resultHash)`, and the raw
+      `resultHash` stays as the grouping key for M-of-N. Recoverable (r, s, v)
+      signatures, so a contract can `ecrecover` without being handed a pubkey.
+      The preimage layout is a schema decision Solidity has to reconstruct byte
+      for byte, and `SealedResult` is already threaded through
+      `primitives::wire`, `node::protocol` and both roles — see
+      [next-architecture.md](next-architecture.md) §2.4 for why this is the type
+      most expensive to change late.
+
+      Do the ten lines in §2.5 at the same time: `JobDispatch` has no
+      `bytecode_hash`, so a worker never checks *which* program it ran and
+      attests to less than the contract will assume. Add `program_id` and
+      `bytecode_hash` to the dispatch, verify before evaluating, and put
+      `programId` in the digest above.
+
+      **Do not implement `fulfillJob` before deciding this.**
 - [ ] **2.10b Enforce the reproducibility preconditions at registration.** Byte
       equality holds only for workers sharing one CPU architecture (x86 and ARM
       diverge), with the FFT plan pinned, evaluating on CPU (the `gpu` feature

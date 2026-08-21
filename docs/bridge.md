@@ -105,8 +105,20 @@ Design notes:
   reject a mismatch (task 2.10b); until it does, disagreement is evidence of
   *divergence*, not of dishonesty, and must not feed slashing.
 - **Escrow pays the coordinator on fulfillment** and refunds the poster on
-  timeout. No slashing in the demo; dishonest workers only waste their own time
-  since they cannot forge agreement.
+  timeout. No slashing in the demo; dishonest *workers* only waste their own
+  time, since they cannot make other workers agree with them.
+
+- **A dishonest coordinator can forge agreement outright, and this interface
+  does not prevent it.** Attestations are unsigned: a `SealedResult` is a blob
+  and `keccak256(blob)`, computable by anyone. The coordinator supplies the
+  `attesters` array, so the contract can verify only that those addresses are
+  registered and distinct — not that they ever saw the job. Nothing contradicts
+  a fabricated set: the workers signed nothing, and the key holder cannot tell a
+  wrong plaintext from a right one. **`fulfillJob` must not be implemented
+  against this signature.** Workers need signing keys and the contract needs to
+  `ecrecover` each attestation (task 2.10i); the cost is roughly 3.5k gas per
+  attester against a 250-350k transaction, which reverses the reasoning in
+  architecture.md §11 Q3.
 
 ## 3. Key lifecycle
 
