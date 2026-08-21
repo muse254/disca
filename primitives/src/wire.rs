@@ -90,6 +90,38 @@ pub fn decode_server_key(bytes: &[u8]) -> Result<ServerKey> {
     Ok(compressed.decompress())
 }
 
+/// Upper bound accepted when decoding a client key.
+///
+/// The client key measures 23.5 KB (`architecture.md` §2). 1 MB is generous
+/// headroom for a parameter change without letting a malformed file name an
+/// arbitrary allocation.
+pub const MAX_CLIENT_KEY_BYTES: u64 = 1024 * 1024;
+
+/// Encodes the client key so the key holder can keep it between invocations.
+///
+/// **This is the secret.** Everything else in this module is designed to be
+/// safe in the open — ciphertexts, the server key, commitments — and this is
+/// the one value that is not. It exists because the key holder is a sequence of
+/// separate `disca-cli` runs (`keygen`, then `encrypt`, then `decrypt` after a
+/// job settles) rather than one long-lived process, and a key that cannot
+/// survive between them cannot decrypt a result it encrypted the inputs for.
+///
+/// Nothing here protects it at rest. That is the caller's problem and the
+/// caller should be honest about it: the demo writes it to a file next to the
+/// server key.
+pub fn encode_client_key(key: &ClientKey) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    safe_serialize(key, &mut out, MAX_CLIENT_KEY_BYTES)
+        .map_err(|e| ProgramError(format!("failed to encode client key: {e}")))?;
+    Ok(out)
+}
+
+/// Decodes a client key the key holder wrote earlier.
+pub fn decode_client_key(bytes: &[u8]) -> Result<ClientKey> {
+    safe_deserialize(bytes, MAX_CLIENT_KEY_BYTES)
+        .map_err(|e| ProgramError(format!("failed to decode client key: {e}")))
+}
+
 /// Encrypts a value into the compressed form that crosses the boundary.
 ///
 /// Only the key holder can call this: it needs the client key, which by
@@ -209,6 +241,32 @@ mod tests {
             commitment(&other),
             "distinct ciphertexts must not share a commitment"
         );
+    }
+
+    #[test]
+    fn a_client_key_survives_a_round_trip_through_its_encoded_form() {
+        // The key holder is a sequence of separate `disca-cli` runs, so the key
+        // that encrypts the inputs has to be the same one that decrypts the
+        // result an hour later. If this ever stopped holding, the failure would
+        // be a wrong plaintext rather than an error — `attestation.md` §1 is
+        // explicit that nothing downstream can tell those apart.
+        let (client_key, _) = generate_keys(ConfigBuilder::default().build());
+
+        let encoded = encode_client_key(&client_key).unwrap();
+        let restored = decode_client_key(&encoded).unwrap();
+
+        let ciphertext = encrypt_input(-42, &client_key).unwrap();
+        let decrypted: i32 =
+            decompress(&decode(&encode(&ciphertext).unwrap()).unwrap()).decrypt(&restored);
+        assert_eq!(
+            decrypted, -42,
+            "the restored key must decrypt what the original encrypted"
+        );
+    }
+
+    #[test]
+    fn a_client_key_is_not_read_from_arbitrary_bytes() {
+        assert!(decode_client_key(b"not a key").is_err());
     }
 
     #[test]
