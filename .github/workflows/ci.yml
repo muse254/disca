@@ -246,3 +246,38 @@ jobs:
           name: coverage-lcov
           path: target/lcov.info
           retention-days: 14
+
+  # The Ethereum bridge (bridge/, docs/bridge.md). Independent of every job
+  # above: no cargo, no Rust cache, nothing shared. It needs no `needs:` for
+  # the same reason — solc compiles the whole of bridge/ in about two seconds,
+  # so there is no expensive job to gate.
+  contracts:
+    name: contracts
+    runs-on: ubuntu-latest
+    # Minutes, not hours. If this ever approaches the limit, something is
+    # wrong with the runner rather than with the contracts.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # forge-std is a submodule (bridge/lib/forge-std). Without this the
+          # directory checks out empty and every import fails.
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      # solc is pinned in bridge/foundry.toml and downloaded on first use; the
+      # attestation digest is a cross-language contract with
+      # primitives/src/attest.rs, so the compiler version is not a detail.
+      - name: build
+        run: forge build
+        working-directory: bridge
+
+      # -vv so the gas table in test/FulfillGas.t.sol is printed in the log
+      # rather than only living in a comment. The numbers in docs/bridge.md §1
+      # were arithmetic; these are measured, and a run that silently drifts is
+      # how they go stale again.
+      - name: test
+        run: forge test -vv
+        working-directory: bridge
