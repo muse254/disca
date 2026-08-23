@@ -222,9 +222,15 @@ involved.
       in the same message as the bytes it commits to, so it detects corruption,
       not a malicious coordinator. Real once the commitment comes from the
       chain (Track 3).
-- [ ] **2.9f Re-verify input commitments against the chain**, not against the
+- [x] **2.9f Re-verify input commitments against the chain**, not against the
       dispatch, once `submitJob` exists. This is what makes 2.9e's check
-      adversarial rather than merely diagnostic.
+      adversarial rather than merely diagnostic. Done in `verify_inputs`
+      (`node/src/watcher.rs`, task 3.4): each blob is checked against the
+      commitment the event carries *and* the event's commitments against the
+      ones in contract storage, so an endpoint that fabricates a log has to
+      fabricate the job it names. The worker's own check stays where it is —
+      the worker checks the dispatch it was given, the watcher checks the
+      dispatch it is about to give.
 
 ### 2.11 Housekeeping
 
@@ -414,9 +420,18 @@ the absence of per-job state was.
       id it invented** while `fulfillJob` rebuilt the digest from the id
       `submitJob` assigned, so correct settlements were rejected as
       `NotRegisteredWorker` — `--job-id` closes it.
-- [ ] **3.4 Alloy chain watcher** in the coordinator role — subscribe to
-      `JobRequested`, validate blob commitments, dispatch, submit `fulfillJob`.
-      Adds `alloy` as the first non-tfhe dependency.
+- [x] **3.4 Alloy chain watcher** — `node watcher` (`node/src/watcher.rs`):
+      polls `JobRequested`, verifies each input blob against the commitment the
+      chain holds (2.9f), dispatches through the same `accept_job` the CLI uses,
+      and submits `fulfillJob` signed by the coordinator key. A separate role
+      rather than chain flags on `coordinator`, so the chainless path is
+      untouched by construction. M, the program hashes and the job id all come
+      from the chain rather than from flags. `scripts/run-anvil.sh --watcher`
+      settles a real job with no `cast send fulfillJob` anywhere, and asserts
+      the settling transaction is none of the ones it sent. Reorg handling is a
+      `--confirmations` delay plus a state read; what that does not cover is
+      listed in the module doc. Adds `alloy` as the first non-tfhe dependency:
+      186 lockfile packages to 478, 149 crates compiled into `node` to 282.
 - [x] **3.5 `refundOnTimeout`** — done, with the deadline a per-deployment
       immutable and fulfilment after it refused, so settlement is not a race
       between coordinator and poster over one escrow. **The disputed-job path is

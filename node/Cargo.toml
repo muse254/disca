@@ -21,3 +21,7 @@ tiny_http = { workspace = true }
 ureq = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# The chain half (task 3.4). Only `watcher.rs` uses these; every other role in
+# this binary still runs with no chain at all.
+alloy = { workspace = true }
+tokio = { workspace = true }

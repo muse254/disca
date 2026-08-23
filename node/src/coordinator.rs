@@ -44,19 +44,25 @@
 //! keyed by job id in [`Coordinator::jobs`], and `POST /results` routes an
 //! arriving report to one of them by the id the report names.
 //!
-//! That is a prerequisite for task 3.4 rather than a convenience. A chain
-//! watcher receives `JobRequested` events concurrently and has to keep several
-//! jobs in flight; landing it on top of one process-global inbox would mean
-//! debugging concurrency and chain plumbing at once, and the first two
-//! concurrent jobs would eat each other's votes — the inbox is keyed by
-//! attester address, so two jobs sharing one would let a worker's report for
-//! job A occupy that worker's only slot in job B.
+//! That was a prerequisite for task 3.4 rather than a convenience. The chain
+//! watcher ([`crate::watcher`]) receives `JobRequested` events concurrently and
+//! keeps several jobs in flight; landing it on top of one process-global inbox
+//! would have meant debugging concurrency and chain plumbing at once, and the
+//! first two concurrent jobs would have eaten each other's votes — the inbox is
+//! keyed by attester address, so two jobs sharing one would let a worker's
+//! report for job A occupy that worker's only slot in job B.
 //!
 //! Task 2.0d claimed the coordinator-local job id was chosen so that swapping
 //! in the on-chain one would "touch one place". It was never the id that was in
 //! the way; it was the absence of per-job state. [`Coordinator::accept_job`]
 //! takes the id as an argument for exactly that reason — `None` mints one
-//! locally, and the watcher will pass the one `submitJob` assigned.
+//! locally, and the watcher passes the one `submitJob` assigned.
+//!
+//! There are two callers now and they share everything here. [`run`] is the
+//! one-shot command line: one job from argv, its answer written to files, its
+//! failure the process's exit code. `watcher::run` is the chain: every job a
+//! contract posts, each on its own thread, each answer a `fulfillJob`
+//! transaction. Nothing below this line knows which of the two it is serving.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -110,9 +116,11 @@ pub struct Config {
     /// other respect correct — `NotRegisteredWorker`, for a worker that is
     /// registered.
     ///
-    /// That is not hypothetical: it is what `scripts/run-anvil.sh` hit, and why
-    /// it settles from a fixture rather than from the coordinator. Task 2.9f is
-    /// this flag being supplied by the watcher instead of by a shell script.
+    /// That is not hypothetical: it is what `scripts/run-anvil.sh` hit before
+    /// this field existed, and why it settled from a fixture rather than from
+    /// the coordinator. The flag remains for that script's `cast`-driven mode,
+    /// where a shell reads the id off the chain and passes it in; the watcher
+    /// needs no flag, because it has the event.
     pub job_id: Option<u64>,
     /// Where to write the winning group's signatures, in the shape
     /// `fulfillJob` takes. See [`attestations_json`].
@@ -342,8 +350,15 @@ impl Job {
 }
 
 /// Where a job is in its life, and what it came to once it is over.
+///
+/// `pub(crate)` from here down to [`Attester`] because the chain watcher
+/// (`crate::watcher`, task 3.4) is the second caller of
+/// [`Coordinator::settle`] and has to turn a settlement into `fulfillJob`
+/// calldata. The CLI path writes the same values to a file through
+/// [`attestations_json`]; a watcher submitting a transaction needs them as
+/// values, not as JSON it would then have to parse back.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Outcome {
+pub(crate) enum Outcome {
     /// Accepted and collecting. No quorum yet, and the deadline has not passed.
     Collecting,
     /// `required` distinct registered attesters signed the same result.
@@ -356,11 +371,11 @@ enum Outcome {
 
 /// What a settled job amounts to, and everything `fulfillJob` needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Settlement {
-    result: SealedResult,
+pub(crate) struct Settlement {
+    pub(crate) result: SealedResult,
     /// The winning group, ascending by address. See [`attesters_of`] for why
     /// the ordering is part of the value rather than a presentation detail.
-    attesters: Vec<Attester>,
+    pub(crate) attesters: Vec<Attester>,
 }
 
 /// One member of the winning group: who signed, and what they signed with.
@@ -371,9 +386,9 @@ struct Settlement {
 /// §2b records; handed the signatures, it recovers the addresses itself and the
 /// coordinator's word is not part of the check.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Attester {
-    address: Address,
-    attestation: Attestation,
+pub(crate) struct Attester {
+    pub(crate) address: Address,
+    pub(crate) attestation: Attestation,
 }
 
 /// Why a report that arrived on `/results` was not counted.
@@ -658,7 +673,7 @@ impl Coordinator {
     /// will hand each `JobRequested` to a thread that does the same. Two such
     /// threads share the registry lookup and nothing else — each job's grace,
     /// deadline and quorum are its own.
-    fn settle(&self, job_id: u64) -> Result<Outcome, String> {
+    pub(crate) fn settle(&self, job_id: u64) -> Result<Outcome, String> {
         let job = self
             .job(job_id)
             .ok_or_else(|| format!("no job {job_id} was accepted by this coordinator"))?;
@@ -787,7 +802,13 @@ pub fn run(config: Config) -> Result<(), String> {
 ///
 /// Split out so the rule can be tested at its boundary without binding sockets
 /// or fanning a job out; `accept_job` calls it before doing either.
-fn quorum_error(attesters: usize, workers: usize) -> Option<String> {
+///
+/// The chain watcher calls it a second time, at startup rather than per job:
+/// it takes M from `registerProgram` and N from `--worker`, so a deployment
+/// whose registered quorum is not a majority of the workers this operator runs
+/// is a configuration that can never settle anything. Better said once at
+/// startup than once per job, after the fan-out, forever.
+pub(crate) fn quorum_error(attesters: usize, workers: usize) -> Option<String> {
     if attesters == 0 || attesters > workers {
         return Some(format!(
             "--attesters {attesters} is impossible with {workers} worker(s)"
@@ -894,7 +915,12 @@ fn check_program(bytecode_blob: &[u8], function: &str) -> Result<usize, String> 
 /// the report to [`Coordinator::deliver`], which routes on the id the report
 /// names. That is what lets a second job be accepted while a first is still
 /// collecting, and it is all this layer knows about jobs.
-fn serve(bind: &str, coordinator: Arc<Coordinator>) -> Result<(), String> {
+///
+/// `pub(crate)` because the chain watcher stands the same surface up: a worker
+/// pulls the server key and posts its report over it whether the job came from
+/// argv or from a `JobRequested` event. A second copy in `watcher.rs` would be
+/// a second place for `/results` routing to drift from what workers send.
+pub(crate) fn serve(bind: &str, coordinator: Arc<Coordinator>) -> Result<(), String> {
     let server = tiny_http::Server::http(bind).map_err(|e| format!("cannot bind {bind}: {e}"))?;
     info!(bind = %bind, "coordinator listening");
 

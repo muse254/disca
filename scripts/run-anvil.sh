@@ -16,8 +16,33 @@
 #                                       # fails and the job refunds
 #   HONEST=1 ./scripts/run-anvil.sh     # all three honest; the second job is
 #                                       # simply never worked on
+#   ./scripts/run-anvil.sh --watcher    # nothing here sends fulfillJob: the
+#                                       # watcher reads the job off the chain
+#                                       # and settles it (task 3.4)
 #   ./scripts/run-anvil.sh --synthetic  # contracts and chain only, no Rust, no
 #                                       # FHE; what CI runs
+#
+# ## --watcher, and what it is for
+#
+# Everything else in this file drives the lifecycle by hand: `cast send` posts
+# the job, a coordinator runs it, and `cast send` settles it. That demonstrates
+# the contracts and says nothing about whether DISCA can settle a job by
+# itself — the shell is doing the part a node would have to do.
+#
+# `--watcher` removes exactly that step. `node watcher` subscribes to
+# `JobRequested`, verifies the input blobs against the commitments the *chain*
+# holds, runs the job through the same three workers, and submits `fulfillJob`
+# signed by the coordinator key. This script sends no settlement at all, and
+# does not merely say so: `send` records every transaction hash it produces and
+# the run asserts the settling transaction is not among them.
+#
+# Two things move in that mode, both deliberately. Pass two becomes the §6
+# "coordinator goes silent" row — the watcher is stopped before the second job
+# is posted, because it would otherwise settle that job at the 2-of-3 the chain
+# registered, and there would be no refund left to demonstrate. And the result
+# blob comes back out of `JobFulfilled` rather than off disk: the watcher writes
+# no file, so the chain's copy is the only copy, which is what §5a argues the
+# key holder should have been using all along.
 #
 # **Both passes are needed to conclude anything, and so are both modes.** A
 # settlement that always succeeds proves nothing about the quorum check: you see
@@ -39,20 +64,18 @@
 # input commitments, the input ciphertexts, the evaluation, the result blob,
 # the worker identities, and the gas.
 #
-# Not yet real: **who produced the signature bytes.** The coordinator is gaining
-# `--attestations <path>`; until it has it, this script signs the §2a claim
-# itself with `bridge/script/fixtures/sign-attestations.sh`, under the same
-# worker keys (`keccak256("DISCA/dev-key/v1" || id)`, which is what
-# `primitives::attest::WorkerKey::derive` computes) and over exactly the
-# attester set the coordinator settled on. The `ATTESTATION SOURCE` banner in
-# the "collecting the attestations" step says which of the two ran, every time.
+# Possibly not real: **who produced the signature bytes.** The coordinator has
+# `--attestations <path>` and `--job-id`, so in the ordinary mode the signatures
+# are the workers' own, over the id `submitJob` assigned. If either flag is
+# missing from the binary this script falls back to signing the §2a claim itself
+# with `bridge/script/fixtures/sign-attestations.sh`, under the same worker keys
+# (`keccak256("DISCA/dev-key/v1" || id)`, which is what
+# `primitives::attest::WorkerKey::derive` computes) and over exactly the attester
+# set the coordinator settled on. The `ATTESTATION SOURCE` banner in the
+# "collecting the attestations" step says which of the three ran, every time.
 #
-# There is a second reason the fixture is currently unavoidable, and it is not a
-# missing flag: the coordinator invents its own job id (a timestamp-shaped
-# nonce), while `fulfillJob` builds its digest from the id `submitJob` assigned.
-# The two cannot agree until task 2.9f moves id assignment on-chain. This script
-# checks for that explicitly rather than letting it surface as
-# `NotRegisteredWorker`, which would read as a broken registry.
+# Under `--watcher` there is no file at all: the signatures never leave the
+# watcher's memory between `collect` and the `fulfillJob` calldata.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -86,9 +109,12 @@ RPC="http://127.0.0.1:${ANVIL_PORT}"
 MNEMONIC=${MNEMONIC:-"test test test test test test test test test test test junk"}
 
 NETWORK=real
+# Who sends `fulfillJob`: this script, or `node watcher`.
+SETTLE=cast
 for arg in "$@"; do
   case "$arg" in
     --synthetic) NETWORK=synthetic ;;
+    --watcher) SETTLE=watcher ;;
     -h | --help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d'
       exit 0
@@ -99,6 +125,14 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if [ "$SETTLE" = watcher ] && [ "$NETWORK" = synthetic ]; then
+  echo "run-anvil: --watcher and --synthetic are incompatible." >&2
+  echo "Synthetic mode fabricates a result blob because there is no DISCA network" >&2
+  echo "in it; the watcher settles what a real one produced. There is nothing for" >&2
+  echo "it to watch." >&2
+  exit 2
+fi
 
 # The first five accounts of the mnemonic above. Public knowledge, and this is a
 # throwaway chain. Five distinct parties rather than one, because "the escrow
@@ -166,7 +200,14 @@ call() {
 
 # `cast send`, with the receipt status checked. A reverted transaction is
 # mined, so `cast send` succeeds and the run would sail past it.
+#
+# Every hash it produces is kept. In `--watcher` mode the claim being made is
+# that this script did not settle the job, and "there is no `cast send
+# fulfillJob` in the file" is a claim about the source that nobody re-reads;
+# "the transaction that emitted `JobFulfilled` is not one of the N this run
+# sent" is a claim the run itself checks.
 LAST_RECEIPT=""
+SENT_TX=()
 send() {
   local key=$1
   shift
@@ -182,6 +223,20 @@ send() {
     0x1 | 1 | success) ;;
     *) die "transaction reverted (status=$status): ${summary}..." ;;
   esac
+  SENT_TX+=("$(printf '%s' "$LAST_RECEIPT" | jq -r '.transactionHash' | tr 'A-F' 'a-f')")
+}
+
+# Fails if this script sent the named transaction. The `--watcher` mode's whole
+# assertion.
+assert_not_ours() {
+  local label=$1 hash
+  hash=$(printf '%s' "$2" | tr 'A-F' 'a-f')
+  [ -n "$hash" ] && [ "$hash" != "null" ] || die "$label: no transaction hash to check"
+  for sent in "${SENT_TX[@]:-}"; do
+    [ "$sent" != "$hash" ] || die "$label: $hash was sent by this script, not by the watcher"
+  done
+  printf '   ok  %s: %s is none of the %d transaction(s) this script sent\n' \
+    "$label" "$hash" "${#SENT_TX[@]}"
 }
 
 # `cast send` that is *required* to fail. Used where the point being made is
@@ -261,6 +316,22 @@ write_hex() {
 # `tracing` writes colour even when its output is a file, so every log this
 # script parses has to come through here first.
 strip_ansi() { sed $'s/\033\\[[0-9;]*[A-Za-z]//g'; }
+
+# The `JobFulfilled` log for one job, fetched from the chain rather than read
+# out of a receipt.
+#
+# In `--watcher` mode there is no receipt to read: the transaction was sent by
+# another process, which is the entire point of that mode. Filtered on both
+# topics — the event signature and the indexed job id — so a run that settles
+# more than one job cannot pick up the wrong one.
+job_fulfilled_log() {
+  local job_id=$1 topic0 topic1
+  topic0=$(cast keccak "JobFulfilled(uint256,bytes32,bytes)")
+  topic1=$(cast --to-uint256 "$job_id")
+  cast rpc --rpc-url "$RPC" eth_getLogs \
+    "{\"address\":\"$BRIDGE\",\"fromBlock\":\"0x0\",\"toBlock\":\"latest\",\"topics\":[\"$topic0\",\"$topic1\"]}" ||
+    die "eth_getLogs for JobFulfilled($job_id) failed"
+}
 
 # --- preflight ---------------------------------------------------------------
 
@@ -594,6 +665,110 @@ if [ "$NETWORK" = real ]; then
       "$@" > "$log" 2>&1
   }
 
+  run_watcher() {
+    local log=$1
+    # Deliberately *not* given the job. There is no --input, no --job-id and no
+    # --attesters here: the inputs, the id and the quorum all come off the
+    # chain, and the result goes back to it. What this passes is the deployment
+    # and the workers — the two things an operator knows and a contract does
+    # not.
+    #
+    # --confirmations is left at its default of 0 because Anvil mines only when
+    # a transaction arrives: a job in the newest block would otherwise wait for
+    # some unrelated transaction to bury it, and this script has none to send.
+    #
+    # --from-block is left at its default of 0 too, which is the restart
+    # behaviour rather than a shortcut: there is no cursor on disk, so every
+    # start rescans the chain and skips what is no longer Open. Step "restarting
+    # the watcher" below is that claim being checked.
+    "$NODE" watcher \
+      --rpc "$RPC" \
+      --bridge "$BRIDGE" \
+      --coordinator-key "$COORDINATOR_KEY" \
+      --bind "$COORDINATOR_BIND" \
+      --worker "127.0.0.1:${WORKER_PORTS[0]}" \
+      --worker "127.0.0.1:${WORKER_PORTS[1]}" \
+      --worker "127.0.0.1:${WORKER_PORTS[2]}" \
+      "${registry[@]}" \
+      --program-id "$PROGRAM_ID" \
+      --bytecode "$work/program.bytecode" \
+      --function "$FUNCTION" \
+      --server-key "$work/keys/server.key" \
+      --deadline-secs "$DEADLINE" \
+      > "$log" 2>&1 &
+    WATCHER_PID=$!
+    pids+=($WATCHER_PID)
+  }
+
+  stop_watcher() {
+    [ -n "$WATCHER_PID" ] || return 0
+    kill "$WATCHER_PID" 2> /dev/null || true
+    wait "$WATCHER_PID" 2> /dev/null || true
+    WATCHER_PID=""
+  }
+fi
+
+WATCHER_PID=""
+if [ "$SETTLE" = watcher ]; then
+  step "starting the chain watcher"
+  note "Nothing below sends fulfillJob. The watcher reads job $JOB_ID off the"
+  note "chain, checks each input blob against the commitment the *contract* is"
+  note "holding — task 2.9f, and the first commitment check here that an"
+  note "adversary cannot satisfy by recomputing it — runs the job through the"
+  note "same three workers, and submits the settlement itself."
+
+  # Sampled before the watcher exists, because the watcher is what will move
+  # them. The `resultCommit()` zero check is the negative half of the callback
+  # assertion further down: without it, a tally that was already set would
+  # satisfy that check for free.
+  coordinator_before=$(cast balance --rpc-url "$RPC" "$coordinator")
+  assert_eq "tally.resultCommit() before settlement" \
+    "$(call "$TALLY" "resultCommit()(bytes32)")" \
+    "0x0000000000000000000000000000000000000000000000000000000000000000"
+
+  run_watcher "$work/watcher.log"
+
+  step "waiting for the watcher to settle job $JOB_ID"
+  # Bounded by the coordinator's own deadline plus the FHE evaluation it is
+  # waiting on, with slack. A watcher that gives up logs why and keeps running,
+  # so the timeout below is the only thing that can end this loop unhappily —
+  # and the watcher's log is what says which of the two happened.
+  settled_state=""
+  for _ in $(seq 1 $((DEADLINE * 2 + 240))); do
+    kill -0 "$WATCHER_PID" 2> /dev/null ||
+      {
+        tail -30 "$work/watcher.log" >&2
+        die "the watcher exited before settling job $JOB_ID; see $work/watcher.log"
+      }
+    settled_state=$(job_field "$JOB_ID" $JOB_FIELD_STATE)
+    [ "$settled_state" = "2" ] && break
+    sleep 1
+  done
+  [ "$settled_state" = "2" ] ||
+    {
+      tail -30 "$work/watcher.log" >&2
+      die "job $JOB_ID is in state ${settled_state:-unknown}, not Fulfilled, after $((DEADLINE * 2 + 240))s"
+    }
+  note "the watcher settled it: $(strip_ansi < "$work/watcher.log" | grep 'job settled on-chain' | tail -1)"
+
+  # The result blob comes back out of the event rather than off disk. The
+  # watcher writes no file — `docs/bridge.md` §5a's argument for emitting the
+  # blob is precisely that the key holder should be taking the bytes a quorum
+  # attested to rather than whatever a coordinator chose to hand over, and with
+  # no file there is nothing else to take.
+  settle_log=$(job_fulfilled_log "$JOB_ID")
+  [ "$(printf '%s' "$settle_log" | jq 'length')" = "1" ] ||
+    die "expected exactly one JobFulfilled log for job $JOB_ID"
+  settle_tx=$(printf '%s' "$settle_log" | jq -r '.[0].transactionHash')
+  assert_not_ours "the transaction that settled job $JOB_ID" "$settle_tx"
+
+  decoded=$(cast abi-decode "f()(bytes32,bytes)" \
+    "$(printf '%s' "$settle_log" | jq -r '.[0].data')") ||
+    die "could not decode the JobFulfilled data"
+  result_hash=$(printf '%s\n' "$decoded" | sed -n 1p)
+  write_hex "$(printf '%s\n' "$decoded" | sed -n 2p)" "$work/result.blob"
+  source_label="WATCHER — submitted by \`node watcher\` in $settle_tx"
+elif [ "$NETWORK" = real ]; then
   step "running the job: $ATTESTERS-of-${#WORKER_IDS[@]} over $FUNCTION"
   # `${arr[@]+"${arr[@]}"}` rather than `"${arr[@]:-}"`: the latter expands an
   # empty array to one empty-string argument, which the coordinator would
@@ -651,12 +826,24 @@ fi
 note "result_hash = $result_hash ($(wc -c < "$work/result.blob" | tr -d ' ') bytes)"
 
 # --- the attestations --------------------------------------------------------
+#
+# Skipped entirely under `--watcher`: the signatures went straight from the
+# coordinator's `collect` into `fulfillJob` calldata without ever being a file,
+# and the chain has already accepted them. Everything this section does — check
+# the job id they were signed over, check every attester is registered, format
+# them for `cast` — is work done here only because the settlement is being
+# assembled here.
 
-step "collecting the attestations"
 attestations="$work/attestations.json"
-source_label=""
 
-if [ -s "$attestations" ]; then
+if [ "$SETTLE" = watcher ]; then
+  step "the attestations (nothing to collect)"
+  note "The watcher submitted the workers' signatures itself. There is no"
+  note "attestation file in this mode and no fixture: the only thing that ever"
+  note "held those bytes was the watcher, between reaching quorum and building"
+  note "the calldata."
+elif [ -s "$attestations" ]; then
+  step "collecting the attestations"
   source_label="REAL — written by the coordinator's --attestations"
   file_job_id=$(jq -r '.jobId' "$attestations")
   if [ "$file_job_id" != "$JOB_ID" ]; then
@@ -669,6 +856,7 @@ submitJob assigned — task 2.9f."
   assert_eq "attestations.bytecodeHash" "$(jq -r '.bytecodeHash' "$attestations")" "$bytecode_hash"
   assert_eq "attestations.resultHash" "$(jq -r '.resultHash' "$attestations")" "$result_hash"
 else
+  step "collecting the attestations"
   source_label="FIXTURE — signed by bridge/script/fixtures/sign-attestations.sh"
   if [ "$NETWORK" = real ] && [ -n "$coordinator_job_id" ] && [ "$coordinator_job_id" != "$JOB_ID" ]; then
     note "NOTE: the coordinator signed its own claims over job id $coordinator_job_id,"
@@ -706,41 +894,70 @@ fi
 
 printf '\n   ATTESTATION SOURCE: %s\n\n' "$source_label"
 
-count=$(jq '.attesters | length' "$attestations")
-[ "$count" -ge "$ATTESTERS" ] || die "the attestation file carries $count signature(s), quorum is $ATTESTERS"
+if [ "$SETTLE" != watcher ]; then
+  count=$(jq '.attesters | length' "$attestations")
+  [ "$count" -ge "$ATTESTERS" ] ||
+    die "the attestation file carries $count signature(s), quorum is $ATTESTERS"
 
-# Every attester the file names must be one the chain will count. Checking here
-# turns "the transaction reverted" into "this address is not registered".
-while read -r address; do
-  assert_eq "isRegisteredWorker($address)" \
-    "$(call "$BRIDGE" "isRegisteredWorker(address)(bool)" "$address")" "true"
-done < <(jq -r '.attesters[].address' "$attestations")
+  # Every attester the file names must be one the chain will count. Checking
+  # here turns "the transaction reverted" into "this address is not registered".
+  while read -r address; do
+    assert_eq "isRegisteredWorker($address)" \
+      "$(call "$BRIDGE" "isRegisteredWorker(address)(bool)" "$address")" "true"
+  done < <(jq -r '.attesters[].address' "$attestations")
 
-quorum_arg="[$(jq -r '[.attesters[] | "(\(.r),\(.s),\(.v))"] | join(",")' "$attestations")]"
+  quorum_arg="[$(jq -r '[.attesters[] | "(\(.r),\(.s),\(.v))"] | join(",")' "$attestations")]"
+else
+  # The "must revert" checks below need *some* attestation argument, and this
+  # script never held the watcher's. An empty array is enough for what those
+  # checks are about: `fulfillJob` tests the job's state before it builds a
+  # digest or recovers anything (`DiscaBridge.sol`, `JobNotOpen` above
+  # `ResultBlobMismatch`), so a settled or refunded job is refused before the
+  # array is ever looked at. The stronger version — the watcher's own calldata,
+  # replayed byte for byte — is a step of its own further down.
+  quorum_arg="[]"
+fi
 result_blob_hex=$(hexdump_file "$work/result.blob")
 
 # --- settle ------------------------------------------------------------------
 
-step "fulfillJob"
-coordinator_before=$(cast balance --rpc-url "$RPC" "$coordinator")
-tally_before=$(call "$TALLY" "resultCommit()(bytes32)")
-assert_eq "tally.resultCommit() before settlement" "$tally_before" \
-  "0x0000000000000000000000000000000000000000000000000000000000000000"
+if [ "$SETTLE" = watcher ]; then
+  # Already settled, above, by a process this script only started. The receipt
+  # is fetched rather than held: `send` never ran, which is the claim.
+  step "fulfillJob (already sent, by the watcher)"
+  settle_receipt=$(cast receipt --rpc-url "$RPC" --json "$settle_tx") ||
+    die "cannot read the receipt for $settle_tx"
+  gas_used=$(bigint "$(printf '%s' "$settle_receipt" | jq -r '.gasUsed')")
+  gas_price=$(bigint "$(printf '%s' "$settle_receipt" | jq -r '.effectiveGasPrice')")
+  assert_eq "the settling transaction's sender" \
+    "$(printf '%s' "$settle_receipt" | jq -r '.from')" "$coordinator"
+else
+  step "fulfillJob"
+  coordinator_before=$(cast balance --rpc-url "$RPC" "$coordinator")
+  tally_before=$(call "$TALLY" "resultCommit()(bytes32)")
+  assert_eq "tally.resultCommit() before settlement" "$tally_before" \
+    "0x0000000000000000000000000000000000000000000000000000000000000000"
 
-send "$COORDINATOR_KEY" "$BRIDGE" \
-  "fulfillJob(uint256,bytes32,bytes,(bytes32,bytes32,uint8)[])" \
-  "$JOB_ID" "$result_hash" "$result_blob_hex" "$quorum_arg"
+  send "$COORDINATOR_KEY" "$BRIDGE" \
+    "fulfillJob(uint256,bytes32,bytes,(bytes32,bytes32,uint8)[])" \
+    "$JOB_ID" "$result_hash" "$result_blob_hex" "$quorum_arg"
 
-gas_used=$(bigint "$(receipt_field .gasUsed)")
-gas_price=$(bigint "$(receipt_field .effectiveGasPrice)")
+  gas_used=$(bigint "$(receipt_field .gasUsed)")
+  gas_price=$(bigint "$(receipt_field .effectiveGasPrice)")
+fi
 printf '   ok  fulfillJob mined: %s gas at %s wei/gas over a %s-byte result blob\n' \
   "$gas_used" "$gas_price" "$(wc -c < "$work/result.blob" | tr -d ' ')"
 
 step "the JobFulfilled event"
-job_fulfilled_topic=$(cast keccak "JobFulfilled(uint256,bytes32,bytes)")
-event_data=$(receipt_field \
-  "[.logs[] | select(.topics[0]==\"$job_fulfilled_topic\")] | .[0].data // empty")
-[ -n "$event_data" ] || die "no JobFulfilled log in the receipt"
+if [ "$SETTLE" = watcher ]; then
+  # From the chain, not from a receipt this script is holding — there is none.
+  event_data=$(job_fulfilled_log "$JOB_ID" | jq -r '.[0].data')
+else
+  job_fulfilled_topic=$(cast keccak "JobFulfilled(uint256,bytes32,bytes)")
+  event_data=$(receipt_field \
+    "[.logs[] | select(.topics[0]==\"$job_fulfilled_topic\")] | .[0].data // empty")
+fi
+[ -n "$event_data" ] || die "no JobFulfilled log for job $JOB_ID"
 
 decoded=$(cast abi-decode "f()(bytes32,bytes)" "$event_data") ||
   die "could not decode the JobFulfilled data"
@@ -774,9 +991,18 @@ step "decrypting the blob the chain carries"
 # attested to rather than whatever the coordinator chose to hand over, and the
 # only way to demonstrate that is to fetch it back out of the event.
 write_hex "$event_blob" "$work/from-chain.blob"
-cmp -s "$work/from-chain.blob" "$work/result.blob" ||
-  die "the blob the chain emitted differs from the one the coordinator wrote"
-note "the chain's blob is byte-identical to the coordinator's"
+if [ "$SETTLE" = watcher ]; then
+  # Nothing to compare it against, and that is the honest end of §5a's
+  # argument rather than a check going missing: the watcher writes no file, so
+  # the bytes a quorum attested to are the only bytes anyone has. What would be
+  # compared here in the other mode — "the coordinator's copy" — is exactly the
+  # copy §5a says the key holder should not be trusting.
+  note "the watcher wrote no file; the chain's blob is the only copy there is"
+else
+  cmp -s "$work/from-chain.blob" "$work/result.blob" ||
+    die "the blob the chain emitted differs from the one the coordinator wrote"
+  note "the chain's blob is byte-identical to the coordinator's"
+fi
 
 if [ "$NETWORK" = real ]; then
   # Asserting the *value* matters. Every check above is about workers agreeing
@@ -804,6 +1030,16 @@ else
 fi
 
 step "a settled job cannot be settled again, or refunded"
+if [ "$SETTLE" = watcher ]; then
+  # The watcher's own calldata, replayed byte for byte. Stronger than
+  # re-encoding it here: this submission was accepted by this contract seconds
+  # ago, so the only thing that can refuse it now is the state change it caused.
+  settle_input=$(cast tx --rpc-url "$RPC" "$settle_tx" input) ||
+    die "cannot read the calldata of $settle_tx"
+  [ -n "$settle_input" ] || die "the settling transaction has no calldata"
+  send_must_revert "replaying the watcher's own fulfillJob calldata" \
+    "$COORDINATOR_KEY" "$BRIDGE" "$settle_input"
+fi
 send_must_revert "second fulfillJob" "$COORDINATOR_KEY" "$BRIDGE" \
   "fulfillJob(uint256,bytes32,bytes,(bytes32,bytes32,uint8)[])" \
   "$JOB_ID" "$result_hash" "$result_blob_hex" "$quorum_arg"
@@ -816,7 +1052,54 @@ send_must_revert "refundOnTimeout on a fulfilled job" "$BYSTANDER_KEY" "$BRIDGE"
 # a withheld result, and workers who never agree all end in the same place,
 # because none of them produce a quorum and the contract cannot tell them apart.
 
+if [ "$SETTLE" = watcher ]; then
+  step "restarting the watcher: a settled job is not settled twice"
+  # The restart path, which is the only reorg-adjacent behaviour the watcher
+  # actually has. It keeps no cursor on disk — a stale one is a way to miss jobs
+  # — so every start rescans from `--from-block` and re-delivers job $JOB_ID to
+  # itself. What stops it running the job again and sending a second
+  # `fulfillJob` is a `jobs(jobId).state` read, and that read is worth checking
+  # here because the failure it prevents is not visible from the outside: the
+  # second transaction would revert with `JobNotOpen`, so the chain would be
+  # fine and only the gas and the wasted worker-seconds would say anything.
+  stop_watcher
+  run_watcher "$work/watcher-restart.log"
+
+  skipped=""
+  for _ in $(seq 1 60); do
+    skipped=$(strip_ansi < "$work/watcher-restart.log" |
+      grep 'skipping a job that is no longer open' | tail -1 || true)
+    [ -n "$skipped" ] && break
+    sleep 0.5
+  done
+  [ -n "$skipped" ] ||
+    {
+      tail -20 "$work/watcher-restart.log" >&2
+      die "the restarted watcher never reported skipping the settled job $JOB_ID.
+It rescans from block 0 with no cursor on disk, so it saw this job again; if it
+did not skip it, it ran it again and sent a second fulfillJob."
+    }
+  note "on restart: $skipped"
+
+  # And the chain agrees: still one settlement, not two.
+  assert_eq "jobs[$JOB_ID].state after the restart" \
+    "$(job_field "$JOB_ID" $JOB_FIELD_STATE)" "2"
+  assert_eq "JobFulfilled logs for job $JOB_ID" \
+    "$(job_fulfilled_log "$JOB_ID" | jq 'length')" "1"
+fi
+
 step "pass two: a job nobody fulfils"
+if [ "$SETTLE" = watcher ]; then
+  # Stopped *before* the job is posted, not after. The watcher takes M from
+  # `registerProgram`, so it would settle this job at the same
+  # $ATTESTERS-of-${#WORKER_IDS[@]} that outvoted the liar a moment ago and
+  # there would be no unfulfilled job left to refund. Killing it first makes
+  # this the §6 "coordinator goes silent" row, which is where §6 routes every
+  # liveness failure anyway — including the unanimity failure the other mode
+  # stages, since the contract cannot tell the two apart.
+  stop_watcher
+  note "the watcher is stopped; nothing is now watching for JobRequested"
+fi
 # Posted by an EOA, deliberately, and *not* through CommitteeTally. A job posted
 # by the tally contract cannot be refunded at all: `refundOnTimeout` sends the
 # escrow with `poster.call{value: escrow}("")`, `CommitteeTally` has no
@@ -833,7 +1116,7 @@ submit_gas=$(bigint "$(receipt_field .gasUsed) * $(receipt_field .effectiveGasPr
 SECOND_JOB=$(call "$BRIDGE" "jobCount()(uint256)")
 assert_eq "the second job is a new job" "$SECOND_JOB" "$(bigint "$JOB_ID + 1")"
 
-if [ "$NETWORK" = real ] && [ -z "${HONEST:-}" ]; then
+if [ "$NETWORK" = real ] && [ "$SETTLE" != watcher ] && [ -z "${HONEST:-}" ]; then
   note "re-running the same three workers at ${#WORKER_IDS[@]}-of-${#WORKER_IDS[@]}."
   note "The liar was outvoted at $ATTESTERS-of-${#WORKER_IDS[@]}; under unanimity it is"
   note "decisive, so no quorum can form. Nothing is staged but the fault."
@@ -885,6 +1168,11 @@ send_must_revert "fulfillJob on a refunded job" "$COORDINATOR_KEY" "$BRIDGE" \
 
 printf '\n== done. %d steps, no assertion skipped.\n' "$step_no"
 printf '   attestation source: %s\n' "$source_label"
+if [ "$SETTLE" = watcher ]; then
+  printf '   this script sent %d transaction(s), and %s was not one of them:\n' \
+    "${#SENT_TX[@]}" "$settle_tx"
+  printf '   job %s was settled by `node watcher`, off the chain'"'"'s own JobRequested.\n' "$JOB_ID"
+fi
 if [ "$NETWORK" = synthetic ]; then
   printf '   synthetic: the contracts and the script were exercised; the FHE was not.\n'
 fi
