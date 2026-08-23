@@ -15,6 +15,7 @@ Design docs: [architecture.md](docs/architecture.md) (constraints, trust model)
 · [tasks.md](docs/tasks.md) (what is built and what is next)
 · [tfhe-determinism-request.md](docs/tfhe-determinism-request.md) (why evaluation
 must be pinned to be reproducible)
+· [`spec/`](spec/) (a TLA+ model of the attestation protocol, and what it proves)
 
 Design decisions carry a pointer to the pull request that produced them, so the
 reasoning and the dead ends stay recoverable rather than only the conclusion.
@@ -181,13 +182,42 @@ with `--report` to see what an update *would* change, without changing anything.
 
 ## Status
 
-The execution core and the distributed layer work. The Ethereum bridge is
-designed but not built — see [tasks.md](docs/tasks.md).
+The execution core, the distributed layer and the Ethereum bridge all work. A
+job posted on-chain is picked up by `node watcher`, evaluated under FHE by three
+workers that never see a plaintext, settled by a contract that recovers each
+signer for itself, and decrypted by the key holder from the ciphertext the chain
+carries. `./scripts/run-anvil.sh --watcher` is that, end to end, in about a
+minute.
 
-## Research paper: The Disca Specification
+What is honest to say about the guarantee, rather than about the plumbing:
 
-The description and formal specification of the Disca protocol, in `paper/`.
-Built with XeLaTex.
+- **The key holder is a single party.** Inputs from mutually distrusting parties
+  need multi-key or threshold FHE, which is not built and is not close
+  ([architecture.md](docs/architecture.md) §2).
+- **L0 admits no permissionless worker set.** Agreement is byte equality over
+  identical evaluation, which is definitionally a closed, homogeneous fleet —
+  one architecture, one tfhe version, one parameter set, the FFT plan pinned. A
+  permissionless set needs the challenge window on the roadmap, not more of
+  this ([attestation.md](docs/attestation.md), `paper/` §3.4).
+- **`reveal` is trusted.** The chain can check that a result was attested; it
+  cannot check that the plaintext a committee publishes is what the ciphertext
+  contained. That needs verifiable decryption or a threshold KMS.
+
+What is left is on [tasks.md](docs/tasks.md), which is kept current rather than
+aspirational.
+
+## Research paper
+
+The description of the Disca protocol and its design rationale, in `paper/`.
+Built with XeLaTeX.
+
+The paper describes the protocol; it is not the formal specification. That is
+[`spec/`](spec/) — a TLA+ model of M-of-N attestation and settlement, checked by
+TLC across 30 configurations, half of which are counterexamples that are
+*supposed* to fail. It found two bugs in this repository. It is also pinned to
+the code it models: `make -C spec drift` fails when a modelled function changes,
+because a model that keeps passing while the code moves underneath it is worse
+than no model at all.
 
 ### Setup
 

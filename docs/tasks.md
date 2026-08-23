@@ -453,10 +453,23 @@ the absence of per-job state was.
 - [x] **4.3 `disca-cli` for real** — `parse` is a no-op (`main.rs:29`) and
       `parser.rs:3` is `todo!()`. Needs at minimum: wasm → bytecode + hash, and
       `keygen`.
-- [ ] **4.4 End-to-end demo script** driving register → submit → evaluate →
-      fulfill → decrypt.
-- [ ] **4.5 Demo video** + README rewrite (it currently documents only the
-      research-paper build, not the project).
+- [x] **4.4 End-to-end demo script** — `scripts/run-anvil.sh --watcher`. No
+      second script was written: this one already drives register → submit →
+      evaluate → fulfil → decrypt, and adding a thinner one beside it to satisfy
+      the wording would have meant two scripts to keep true instead of one.
+
+      It is a demo rather than a happy path. One worker lies and is outvoted; a
+      second pass demands unanimity from the *same three*, where the liar is now
+      decisive, nothing settles, and the escrow returns through
+      `refundOnTimeout`. The plaintext comes back out of the `JobFulfilled`
+      event rather than off disk — in `--watcher` mode the watcher writes no
+      file, so the chain's copy is the only copy.
+- [ ] **4.5 Demo video.** The README half is done: it no longer documents only
+      the paper build, it opens on what the system does, and its Status section
+      says what is true rather than what was true — the bridge is built, and the
+      three things that are still trusted (single key holder, closed worker set,
+      trusted `reveal`) are named there rather than left for a reader to
+      discover. The video is what remains.
 
 ## Stretch (only if the above is done)
 
