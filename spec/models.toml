@@ -41,6 +41,32 @@
 # `node/src/coordinator.rs` is a unit test standing where a model check should
 # be, and a unit test is a fact about one interleaving.
 # ---------------------------------------------------------------------------
+# A second such note, recorded when the chain watcher landed (task 3.4).
+#
+# One item moved, and only in its declaration: `fn quorum_error(` is now
+# `pub(crate) fn quorum_error(`. `--check` reported it as GONE rather than
+# CHANGED because the anchor matches on the declaration line, and that line is
+# part of what gets hashed — so this hash was re-recorded for one keyword. The
+# body is byte-identical, and `2M > N` is the whole of what the model says about
+# this function.
+#
+# The keyword is there because there is now a second caller for a rule the
+# model treats as global. `node/src/watcher.rs` calls it at startup, with M read
+# from `registerProgram` and N from `--worker`, so a deployment whose on-chain
+# quorum is not a majority of the operator's workers is refused before it
+# watches anything. Same rule, same strength, applied earlier; `accept_job`
+# still applies it per job, and that is the call the model corresponds to.
+#
+# Nothing else here moved. The watcher settles through `Coordinator::settle` and
+# `fulfillJob` unchanged. What is new is what the model does not reach:
+# `DiscaAttestation.tla` starts at a dispatched job and says nothing about where
+# a job comes from, so `JobRequested` -> `verify_inputs` -> `accept_job` is
+# unmodelled — including the commitment check that is the point of task 2.9f.
+# That belongs in `README.md`'s "what could not be verified" list beside
+# concurrent jobs, and is recorded here until somebody puts it there: this file
+# is what a person reads when they are deciding whether the model still covers
+# what they changed, which is exactly when it matters.
+# ---------------------------------------------------------------------------
 
 [[item]]
 file = "node/src/coordinator.rs"
@@ -73,9 +99,9 @@ sha256 = "27acde7751d50aae310cce36ab542b56397db95e481ba42cd53300b7838007b4"
 
 [[item]]
 file = "node/src/coordinator.rs"
-item = "fn quorum_error("
+item = "pub(crate) fn quorum_error("
 models = "2M > N — the fix for MC_GraceRace_N4M2, where a minority quorum settles during the straggler grace"
-sha256 = "9ba8134304fe42df787d79a23779a27872f607c7a8506eb363f6ccf78e8e3fea"
+sha256 = "bde35c3c22b6ea1b40166d3a5efcb56c7cd4d67aee45ec7253fe86fe053bf277"
 
 [[item]]
 file = "node/src/coordinator.rs"

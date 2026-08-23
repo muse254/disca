@@ -42,6 +42,23 @@ construction and exists so the script needs no key distribution; a deployment
 passes `--key`. `node worker-address --id <id>` prints the address a worker will
 attest under.
 
+The same thing against a real chain — Anvil, the contracts, escrow, and a
+`fulfillJob` that counts the workers' own signatures — needs `anvil`, `cast` and
+`forge` on the path:
+
+```sh
+./scripts/run-anvil.sh              # the script drives the lifecycle with cast
+./scripts/run-anvil.sh --watcher    # `node watcher` settles it; no cast send
+./scripts/run-anvil.sh --synthetic  # contracts and chain only, no Rust, no FHE
+```
+
+`--watcher` is the one that shows DISCA settling by itself: `node watcher`
+subscribes to `JobRequested`, checks each input blob against the commitment the
+contract is holding, runs the job, and submits the settlement. The script sends
+no `fulfillJob` in that mode and proves it — it records every transaction hash it
+produces and asserts the settling transaction is not one of them
+([bridge.md](docs/bridge.md) §4, §8 step 3).
+
 Single process, no network — the quickest way to tell whether a failure is in
 the execution core or the transport. **Debug builds only**: it doubles as the
 key holder, encrypting and decrypting in the same process, which is exactly the

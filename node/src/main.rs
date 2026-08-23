@@ -1,9 +1,17 @@
 //! DISCA node.
 //!
-//! One binary, three roles. `coordinator` and `worker` are the distributed
-//! system; `demo` is the original single-process evaluator, kept because it is
-//! the fastest way to check the execution core still works without standing up
-//! a network.
+//! One binary, four roles. `worker` evaluates; `coordinator` and `watcher` are
+//! the two ways a job reaches one, taking it from a command line and from a
+//! chain respectively; `demo` is the original single-process evaluator, kept
+//! because it is the fastest way to check the execution core still works
+//! without standing up a network.
+//!
+//! `coordinator` and `watcher` share everything below `accept_job` and differ
+//! only in where a job comes from and where its answer goes — argv and a file,
+//! or `JobRequested` and `fulfillJob`. They are separate roles rather than one
+//! role with chain flags because half of each one's arguments are meaningless
+//! to the other, and because keeping them apart is what guarantees that adding
+//! a chain could not change what `node coordinator` does. See `watcher.rs`.
 //!
 //! All output is [`tracing`] rather than `println!`: these are the measurements
 //! a worker reports to a coordinator, so they are shaped like job telemetry
@@ -52,6 +60,7 @@ mod coordinator;
 mod demo;
 mod protocol;
 mod transport;
+mod watcher;
 mod worker;
 
 use std::path::{Path, PathBuf};
@@ -162,6 +171,132 @@ enum Role {
         /// How long to wait for agreement before giving up.
         #[arg(long, default_value_t = 120)]
         deadline_secs: u64,
+    },
+
+    /// Take jobs from a `DiscaBridge` contract and settle them back to it.
+    ///
+    /// The `coordinator` role with the chain attached (task 3.4,
+    /// `bridge.md` §8 step 3): it subscribes to `JobRequested`, verifies each
+    /// input blob against the commitment the chain is holding, runs the job
+    /// through the same job service, and submits `fulfillJob`. Runs until
+    /// killed, and keeps several jobs in flight.
+    ///
+    /// What it is *not* given is a job. There is no `--input`, no `--job-id`
+    /// and no `--result`: the inputs, the id and the quorum all come from the
+    /// chain, and the result goes back to it. What the operator supplies is the
+    /// deployment (`--rpc`, `--bridge`, `--coordinator-key`), the program they
+    /// registered, and the workers they run.
+    Watcher {
+        /// JSON-RPC endpoint of the chain to watch.
+        ///
+        /// **http only.** This build has no TLS transport — see the `alloy`
+        /// features in the workspace manifest for what that saves and the one
+        /// line that changes it. An `https://` URL is refused at startup rather
+        /// than failing inside the transport once a job has been posted.
+        #[arg(long)]
+        rpc: String,
+
+        /// The deployed `DiscaBridge`.
+        #[arg(long)]
+        bridge: String,
+
+        /// secp256k1 private key of the address the bridge holds as
+        /// `coordinator()`, 32 bytes of hex.
+        ///
+        /// Only that address may call `fulfillJob` (`bridge.md` §2), and the
+        /// gate is about payment rather than trust: an attestation is valid
+        /// because of who signed it, so a stranger relaying a genuine
+        /// settlement would be harmless to correctness — and would collect the
+        /// escrow, which is a free front-run on every settlement. The watcher
+        /// checks this key against `coordinator()` before it waits for a single
+        /// event.
+        ///
+        /// Passing a key on a command line puts it in the process table and the
+        /// shell history, exactly as `worker --key` does, and is acceptable for
+        /// the same reason and no other: there is nothing here yet to protect.
+        #[arg(long)]
+        coordinator_key: String,
+
+        /// Address to serve the server key and worker reports on.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+
+        /// Worker address. Repeat for each worker.
+        #[arg(long = "worker", required = true)]
+        workers: Vec<String>,
+
+        /// Ethereum address whose attestations count. Repeat for each.
+        ///
+        /// Still supplied rather than read from the chain, because the bridge's
+        /// registry is a mapping and a mapping cannot be enumerated. What the
+        /// chain *can* answer is whether a given address is in it, so every
+        /// entry here is checked against `isRegisteredWorker` at startup — the
+        /// alternative is a `NotRegisteredWorker` revert after three workers
+        /// have finished evaluating.
+        #[arg(long = "registered-worker", required = true)]
+        registry: Vec<String>,
+
+        /// The `programId` this watcher runs, as `registerProgram` returned it.
+        ///
+        /// One program per process, and jobs for any other are skipped. The
+        /// coordinator serves exactly one server key at `/keys/<hash>` and
+        /// `registerProgram` pins one `serverKeyHash` per program
+        /// (`bridge.md` §3), so a watcher fronting two programs would need the
+        /// job service to hold two keys — a lifecycle nothing here exercises,
+        /// and the honest way to front a second program today is a second
+        /// process on a second port.
+        #[arg(long)]
+        program_id: u64,
+
+        /// DISCA bytecode to run, from `disca-cli compile`.
+        ///
+        /// Checked against the `bytecodeHash` the program is registered under.
+        #[arg(long)]
+        bytecode: PathBuf,
+
+        /// Exported function within that program.
+        #[arg(long)]
+        function: String,
+
+        /// Compressed server key to distribute, from `disca-cli keygen`.
+        ///
+        /// Checked against the `serverKeyHash` the program is registered under.
+        #[arg(long)]
+        server_key: PathBuf,
+
+        /// How long to wait for agreement on one job before giving up on it.
+        ///
+        /// Giving up means doing nothing: the job's escrow returns to its
+        /// poster through `refundOnTimeout`, which is where `bridge.md` §6
+        /// routes every liveness failure. Keep it comfortably under the
+        /// bridge's own `jobTimeout`, or the watcher is still collecting when
+        /// the job stops being fulfillable.
+        #[arg(long, default_value_t = 120)]
+        deadline_secs: u64,
+
+        /// How many blocks to let a job age before dispatching it.
+        ///
+        /// The reorg mitigation. Zero is the default because Anvil mines only
+        /// when a transaction arrives, so a job in the newest block would
+        /// otherwise wait for an unrelated transaction to bury it. On a chain
+        /// that mines on a timer, set it to that chain's reorg depth — and read
+        /// the "Reorgs and restarts" section of `watcher.rs` for what it does
+        /// and does not buy.
+        #[arg(long, default_value_t = 0)]
+        confirmations: u64,
+
+        /// How long to wait between `eth_getLogs` calls.
+        #[arg(long, default_value_t = 250)]
+        poll_ms: u64,
+
+        /// First block to scan.
+        ///
+        /// There is no cursor on disk: a restart rescans from here, and jobs
+        /// that are no longer `Open` are skipped by reading their state. The
+        /// chain is the cursor, which is why a stale file cannot make this
+        /// watcher miss a job.
+        #[arg(long, default_value_t = 0)]
+        from_block: u64,
     },
 
     /// Evaluate circuits dispatched by a coordinator.
@@ -313,6 +448,46 @@ fn main() {
                 result_out,
                 attestations_out,
                 deadline: Duration::from_secs(deadline_secs),
+            })
+        }),
+
+        Role::Watcher {
+            rpc,
+            bridge,
+            coordinator_key,
+            bind,
+            workers,
+            registry,
+            program_id,
+            bytecode,
+            function,
+            server_key,
+            deadline_secs,
+            confirmations,
+            poll_ms,
+            from_block,
+        } => coordinator::parse_registry(&registry).and_then(|registry| {
+            let bridge = bridge
+                .parse()
+                .map_err(|e| format!("--bridge is not an Ethereum address: {e}"))?;
+            let bytecode = read_blob(&bytecode)?;
+            let server_key = read_blob(&server_key)?;
+
+            watcher::run(watcher::Config {
+                rpc,
+                bridge,
+                coordinator_key,
+                bind,
+                workers,
+                registry,
+                program_id: alloy::primitives::U256::from(program_id),
+                bytecode,
+                function,
+                server_key,
+                deadline: Duration::from_secs(deadline_secs),
+                confirmations,
+                poll: Duration::from_millis(poll_ms),
+                from_block,
             })
         }),
 

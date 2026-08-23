@@ -52,6 +52,57 @@ k256 = { version = "0.13", default-features = false, features = [
   "std",
 ] }
 
+# alloy for the chain watcher (task 3.4, `bridge.md` §4 and §8 step 3).
+#
+# **Not pinned exactly, unlike `tfhe`, and the difference is the failure mode.**
+# The `tfhe` pin exists because a version skew there is *silent*: two honest
+# workers evaluate correctly and disagree byte for byte, and the coordinator
+# sees a fault rather than a version. Nothing about alloy can do that. It reads
+# and writes Ethereum RPC and ABI — both externally specified — so a version
+# that got something wrong fails as a decode error, a reverted transaction, or
+# a compile error, every one of which names itself. Copying the `=` across
+# would advertise a consensus-critical constraint that does not exist and
+# would make it harder to see which pins are real. `Cargo.lock` still pins the
+# exact build; `scripts/check-deps.sh` keeps that honest.
+#
+# The caret is not free of constraints, though. `alloy-primitives` depends on
+# `k256 ^0.13`, which is why the pin above is 0.13 and not 0.14: a major bump
+# on either side would put two secp256k1 implementations in one graph, one
+# verifying attestations off-chain and one recovering addresses for the chain
+# types. `cargo tree -i k256` is the check, and it currently reports one.
+#
+# Features are the narrowest set that compiles the watcher, not `default`:
+#
+#   provider-http  the polling JSON-RPC provider (`bridge.md` §4 chose polling
+#                  over a subscription: no indexing infrastructure)
+#   rpc-types      `Filter`, `Log`, `TransactionRequest`
+#   signer-local   the coordinator's key, which signs `fulfillJob`
+#   sol-types      the `sol!` macro for the event and the call
+#   reqwest/std    the HTTP transport, **without TLS**
+#
+# What is deliberately absent is `contract` (an ABI-object layer over
+# `sol-types` that the watcher does not need — it encodes four calls by hand)
+# and `reqwest-rustls-tls`. Dropping TLS is what keeps `https://` RPC URLs from
+# working, so `watcher::run` refuses one at startup and names this line rather
+# than letting it surface as a transport error. Adding `"reqwest-rustls-tls"`
+# below is the whole fix, and it costs 9 more crates.
+alloy = { version = "2.4", default-features = false, features = [
+  "provider-http",
+  "rpc-types",
+  "signer-local",
+  "sol-types",
+  "reqwest",
+  "std",
+] }
+# alloy is async and there is no blocking façade. The node stays synchronous —
+# `coordinator.rs` and `worker.rs` are threads and channels — so the watcher
+# owns one runtime and blocks on it at each chain call rather than colouring
+# the rest of the binary. `rt-multi-thread` because a per-job thread blocks on
+# that same runtime while the poll loop keeps running.
+tokio = { version = "1", default-features = false, features = [
+  "rt-multi-thread",
+] }
+
 # Dependencies (tfhe especially) are unusably slow when built unoptimized:
 # the adder truth-table tests take ~8 min in a plain debug build. Optimizing
 # only dependencies keeps our own crates fast to compile and debuggable.
