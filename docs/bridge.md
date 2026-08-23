@@ -58,6 +58,12 @@ barely moves the total, because the transaction is paying for its bytes rather
 than its work. Every "order 250-350k" in this document predates that
 measurement and should be read as pre-Pectra.
 
+These figures are for a job with **no consumer**. The demo's own shape has one:
+driven against a real Anvil with a `CommitteeTally` callback, `fulfillJob`
+measures **379,497 and 379,871** across two runs. The ~25k difference is the
+callback's cold `resultCommit` SSTORE and its event — a consumer that stores
+more will cost more, and it is the consumer's gas, not the bridge's.
+
 `architecture.md` §7 targets Anvil and an L2, where this is affordable either
 way. It is stated here so nobody sizes an L1 deployment from the old number.
 

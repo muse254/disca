@@ -368,13 +368,52 @@ only delete the claim, the thing it would have to rest on got built.
       reading, and 2c.3 is a tripwire rather than a proof of it. Concurrent
       jobs, multiple chain ids, registration and gas are not modelled.
 
+## Track 2d — The coordinator as a job service
+
+From `next-architecture.md` §2.2, which showed task 2.0d's "swapping in the
+on-chain job id touches one place" was not true: the id was never the problem,
+the absence of per-job state was.
+
+- [x] **2d.1 Per-job state.** `Coordinator { jobs: HashMap<u64, Arc<Job>> }`,
+      each job owning its verifier, inbox, dispatch set, deadline and outcome.
+      `accept_job(JobSpec) -> jobId` is the entry point and the CLI is now one
+      caller of it. `POST /results` routes by job id; an unknown job is a named
+      404 rather than a silent drop.
+- [x] **2d.2 `JobSpec::job_id: Option<u64>`.** `None` mints one, `Some(id)` is
+      the id the chain assigned — which is what makes on-chain settlement
+      possible at all, since a worker signs a digest binding it.
+- [x] **2d.3 `--attestations <path>`.** The winning group's signatures in the
+      shape `fulfillJob` takes, sorted ascending because the contract requires
+      strictly increasing addresses. Each exported signature is asserted to
+      recover to the address printed beside it.
+- [ ] **2d.4 The model is still single-job.** Routing by id and unknown-job
+      rejection are behaviour no TLC configuration checks. `spec/models.toml`
+      records this; a multi-job model needs new variables and new invariants and
+      is work in its own right.
+
 ## Track 3 — Bridge (`bridge/`, new Foundry project) — needs 0.3
 
 - [x] **3.1 Foundry scaffold** + `DiscaBridge.sol`: program registry, worker
       registry, job escrow, lifecycle, events (bridge.md §2).
 - [x] **3.2 Forge unit tests** for the job state machine and the M-of-N
       attester check.
-- [ ] **3.3 Anvil end-to-end** with a mocked coordinator calling `fulfillJob`.
+- [x] **3.3 Anvil end-to-end** — `scripts/run-anvil.sh`, and not with a mocked
+      coordinator: the workers' own signatures settle it. Deploy, register,
+      `submitJob` with real commitments, evaluate under FHE, `fulfillJob`, then
+      decrypt the ciphertext taken **out of the on-chain event** to 93, plus the
+      refund path and a pass where the liar is decisive so no quorum forms.
+
+      Two things it found that reading the contracts had not. **A
+      `CommitteeTally` holding escrow could never be refunded** — it posts its
+      own job, so `job.poster` is a contract with no `receive`; the bridge's
+      refund `call` fails, the bridge reverts (correctly), and by then the
+      deadline has passed so `fulfillJob` refuses too. Both exits closed against
+      a §6 that promises a refund. Fixed with `receive` and a committee-gated
+      `withdraw`; the unit suite missed it because every refund path there was
+      zero-value or through an EOA. And **the coordinator was signing under an
+      id it invented** while `fulfillJob` rebuilt the digest from the id
+      `submitJob` assigned, so correct settlements were rejected as
+      `NotRegisteredWorker` — `--job-id` closes it.
 - [ ] **3.4 Alloy chain watcher** in the coordinator role — subscribe to
       `JobRequested`, validate blob commitments, dispatch, submit `fulfillJob`.
       Adds `alloy` as the first non-tfhe dependency.
