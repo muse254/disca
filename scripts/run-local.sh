@@ -35,8 +35,13 @@ fi
 # fault-injection is off by default, so a release build cannot be told to
 # return a wrong answer. This demo needs exactly that, so it opts in explicitly.
 echo "building node (with fault-injection) and disca-cli..."
-cargo build --release -p node --features fault-injection
-cargo build --release -p disca-cli
+# One invocation for both binaries, not two. Two `cargo build` calls with
+# different feature sets resolve the graph differently, so each invalidates the
+# other's `primitives` and every run rebuilds from scratch — minutes of it now
+# that `alloy` puts 282 crates in `node`'s tree. `node/fault-injection` names
+# the feature on the package rather than the current one, which is what lets a
+# single invocation carry it.
+cargo build --release -p node -p disca-cli --features node/fault-injection
 
 NODE=target/release/node
 CLI=target/release/disca-cli

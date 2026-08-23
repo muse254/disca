@@ -40,17 +40,23 @@ FLOORS = {
         "the bytes a worker attests to come from here",
     ),
     "node": (
-        25,
-        "the decisions are covered -- M-of-N aggregation, the transport's "
-        "size and status handling, compilation, and the worker's checks "
-        "before it spends CPU on homomorphic work. The remainder is the "
-        "orchestration around them: `run` loops that block on a socket, an "
-        "evaluator thread, a `main` that dispatches on a role, and "
-        "`demo::run`, which logs rather than returning anything to assert "
-        "on. 115 of node's lines (main.rs and demo.rs) are unreachable from "
-        "a unit test as written, which caps this crate around 30% until "
-        "there is an end-to-end harness; scripts/run-local.sh is that "
-        "harness today, and it is not instrumented",
+        50,
+        "the decisions are covered -- M-of-N aggregation, per-job routing and "
+        "rejection, the attestation export, the watcher's startup and "
+        "commitment checks, the transport's size and status handling, and the "
+        "worker's checks before it spends CPU on homomorphic work. The "
+        "remainder is orchestration: `run` loops that block on a socket, an "
+        "evaluator thread, a `main` that dispatches on a role, and the "
+        "watcher's dispatch and submit paths, which need a chain. "
+        "scripts/run-anvil.sh is that test and is not instrumented. "
+        "\n"
+        "This floor said 30% for a long time after the crate passed 50%, on a "
+        "rationale about `demo.rs` that stopped being the binding constraint "
+        "once the coordinator became a job service. A floor twenty points "
+        "under the measured number gates nothing -- it would have let half the "
+        "crate's tests be deleted without a word -- so it is raised to 50% "
+        "against a measured 53%. The margin is small on purpose: the point is "
+        "to notice a regression, not to leave room for one",
     ),
     "disca-cli": (
         85,
