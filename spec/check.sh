@@ -116,7 +116,15 @@ fetch_jar() {
 # TLC's own exit codes are not granular enough to distinguish "the invariant I
 # expected" from "some other invariant", so the report is read from stdout.
 run_one() {
-  local name="$1" expect="$2" log="$OUT/$name.log"
+  local name="$1" expect="$2"
+  # Two `local`s, not one. A `local`'s arguments are expanded before the builtin
+  # runs, so `log="$OUT/$name.log"` on the line above would expand the *caller's*
+  # `name`, not the one being declared beside it. That happens to be the same
+  # value today — the caller's loop variable is also called `name` — so every
+  # log lands in the right file by coincidence. Rename that variable and all 30
+  # configurations write to `$OUT/.log` instead, quietly, leaving the CI job's
+  # uploaded traces as a single file nobody can read a counterexample out of.
+  local log="$OUT/$name.log"
 
   java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC \
       -config "$name.cfg" -workers auto -metadir "$OUT/states-$name" \

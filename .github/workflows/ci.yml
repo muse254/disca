@@ -376,10 +376,17 @@ jobs:
           version: stable
       # bash -n and shellcheck before running it: a syntax error inside a
       # branch the run does not take would otherwise ship green.
+      # Every script in the repository, not just this job's two. The narrower
+      # version passed while `spec/check.sh` had a `local` whose expansion
+      # depended on the caller happening to name a variable the same thing —
+      # the sort of thing shellcheck exists to catch, sitting in a file the lint
+      # step did not look at.
       - name: lint the shell
         run: |
-          bash -n scripts/run-anvil.sh
-          bash -n bridge/script/fixtures/sign-attestations.sh
-          shellcheck scripts/run-anvil.sh bridge/script/fixtures/sign-attestations.sh
+          git ls-files '*.sh'
+          # One file per invocation: `bash -n a b` treats b as an argument to a,
+          # so a second script would never be parsed at all.
+          git ls-files '*.sh' | xargs -n1 bash -n
+          git ls-files '*.sh' | xargs shellcheck
       - name: the round trip
         run: ./scripts/run-anvil.sh --synthetic

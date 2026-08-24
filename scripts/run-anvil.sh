@@ -231,7 +231,9 @@ send() {
 assert_not_ours() {
   local label=$1 hash
   hash=$(printf '%s' "$2" | tr 'A-F' 'a-f')
-  [ -n "$hash" ] && [ "$hash" != "null" ] || die "$label: no transaction hash to check"
+  if [ -z "$hash" ] || [ "$hash" = "null" ]; then
+    die "$label: no transaction hash to check"
+  fi
   for sent in "${SENT_TX[@]:-}"; do
     [ "$sent" != "$hash" ] || die "$label: $hash was sent by this script, not by the watcher"
   done
@@ -697,7 +699,7 @@ if [ "$NETWORK" = real ]; then
       --deadline-secs "$DEADLINE" \
       > "$log" 2>&1 &
     WATCHER_PID=$!
-    pids+=($WATCHER_PID)
+    pids+=("$WATCHER_PID")
   }
 
   stop_watcher() {
@@ -1171,6 +1173,7 @@ printf '   attestation source: %s\n' "$source_label"
 if [ "$SETTLE" = watcher ]; then
   printf '   this script sent %d transaction(s), and %s was not one of them:\n' \
     "${#SENT_TX[@]}" "$settle_tx"
+  # shellcheck disable=SC2016  # the backticks quote a command name in prose.
   printf '   job %s was settled by `node watcher`, off the chain'"'"'s own JobRequested.\n' "$JOB_ID"
 fi
 if [ "$NETWORK" = synthetic ]; then
