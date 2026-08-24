@@ -611,7 +611,12 @@ It verifies that $M$ of $N$ registered nodes signed for the same result, which i
 Publishing the result costs the 11.8 KB of Section 2.3, which keeps settlement inside the cost of an ordinary transaction for a single-value result and would not for ten of them.
 That is the constraint to watch: the design holds while results stay small.
 
-The bridge is specified and not built.
+The bridge is built, and the round trip closes: a job posted on-chain is picked up by a watcher that verifies each input blob against the commitment the contract holds---the first point at which that check is adversarial rather than diagnostic, since until then the commitment travelled beside the bytes it committed to---evaluated by nodes that never see a plaintext, settled by the contract recovering each signer for itself, and decrypted by the key holder from the ciphertext the chain carries.
+Settlement measures 379{,}697 gas over a 12{,}075-byte result blob for a two-of-three job with a consumer callback, against an 11.8~KB blob that dominates the cost.
+Two figures are worth separating from that: a job with no consumer settles for 354{,}377, and on a chain charging the EIP-7623 calldata floor the same transaction costs roughly 510{,}000, because a settlement is almost entirely bytes and almost no computation.
+The attester count barely moves either number.
+
+What remains unbuilt is what Section 3.3 calls L1 and L2, and Section 3.4 explains why the first of them is not optional if the node set is ever to be opened.
 
 \section{References}
 
