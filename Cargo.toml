@@ -29,6 +29,10 @@ tiny_http = "0.12"
 ureq = "3.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Test-only, for asserting the shape of the `DISCA_LOG_FORMAT=json` stream
+# (task 1b.3). Already in the graph via `alloy`, so declaring it adds no
+# package -- it only makes a transitive dependency nameable.
+serde_json = "1"
 sha3 = "0.10"
 # secp256k1 for the per-worker attestation signatures (task 2.10i).
 #

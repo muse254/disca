@@ -94,24 +94,24 @@ Cheap, and unblocks estimating everything downstream.
       rather than debug printing.
 - [x] **1b.2 Wire telemetry into the coordinator/worker roles** — folded into
       Track 2 as 2.7, where it is actionable rather than blocked.
-- [ ] **1b.3 Decide on a machine-readable sink** (JSON layer, or OTLP export)
-      before the demo, so the video can show real job traces.
+- [x] **1b.3 A machine-readable sink.** `DISCA_LOG_FORMAT=json` emits one JSON
+      object per line on **stderr**, leaving stdout for what a command returns.
+      Text remains the default and is byte-identical. Cost: one crate
+      (`tracing-serde`) — `serde` and `serde_json` were already in the graph via
+      `alloy`.
 
-## Track 2 — Node roles and transport (`node/`)
+      Two things a consumer found that reading the code would not have.
+      **`job settled` carried no `job_id`**, because `run` logs it outside the
+      job span — harmless while a coordinator ran one job, wrong the moment it
+      serves several. And the fields were `Debug` strings: `?attesters` became
+      the *string* `"[\"0x09b8…\"]"`, `?result_out` became `"Some(\"/tmp/…\")"`,
+      and `elapsed_ms` was a quoted `u128`. Structurally valid JSON whose values
+      need a second parser is machine-readable in the sense a screenshot is. The
+      list is now comma-separated, paths are plain strings, and `elapsed_ms` is
+      a number.
 
-This is the first work that adds real network surface. The execution core it
-sits on is finished: bytecode encodes and decodes with validation on receipt
-(1.4), the ciphertext boundary and the hash workers attest to are in place
-(1.2), and deterministic evaluation is verified rather than assumed. What
-remains is moving those artifacts between processes.
-
-**Not in this track:** the chain watcher (that is 3.4, and needs the contract to
-exist first), persistence, and any authentication beyond the worker registry.
-Track 2 ends at three local processes agreeing on a result with no chain
-involved.
-
-### 2.0 Decisions to settle before writing code
-
+      Now possible and worth doing: `scripts/run-anvil.sh`'s `strip_ansi` and
+      its three `sed` scrapes can become `jq`.
 - [x] **2.0a HTTP library.** Evaluation is CPU-bound and blocking — a tally is
       ~1 s, a multiply ~2 s — so async buys very little at three workers.
       Recommend a threaded sync server (`tiny_http`) over `axum` + `tokio`:

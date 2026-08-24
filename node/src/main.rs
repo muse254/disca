@@ -581,10 +581,69 @@ fn pin_fft_plan() {
 
 /// Installs the tracing subscriber. `RUST_LOG` wins when set; otherwise we
 /// default to `INFO`, which covers phase timings without per-op noise.
+///
+/// `DISCA_LOG_FORMAT=json` switches to one JSON object per line, on **stderr**.
+/// That is task 1b.3, and the reason it took a consumer to land: every field
+/// these roles already emit — a worker's `address`, `elapsed_ms` on an
+/// evaluation, the `attesters` a job settled on — exists only inside a
+/// human-formatted line today. `scripts/run-anvil.sh` reads three of them with
+/// `sed` and needs a `strip_ansi` helper to do it, and says so.
+///
+/// **Why stderr, and only in this mode.** `worker-address` writes its answer
+/// with `println!`, and the text formatter defaults to stdout — so today the
+/// answer and the log arrive in one stream, which is why `run-local.sh` wraps
+/// that call in `RUST_LOG=off`. Sending the JSON stream to stderr splits
+/// answers from events: stdout is what a command returns, stderr is what it
+/// did. The redirect lives only in this branch, so no existing script sees a
+/// byte of difference.
+///
+/// **Why an environment variable rather than a flag.** This runs before
+/// `Cli::parse()`, and deliberately: `pin_fft_plan` must run before anything
+/// touches an FFT plan, and clap's own errors should be formatted by a
+/// subscriber that already exists. A flag would mean reordering the one
+/// function in this binary whose ordering is load-bearing. An environment
+/// variable also composes with `RUST_LOG`, which is how this binary is already
+/// configured.
 fn init_telemetry() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(Level::INFO.to_string()));
 
+    match std::env::var("DISCA_LOG_FORMAT").as_deref() {
+        Ok("json") => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                // `with_target` stays on here, unlike the text format. A human
+                // reading a terminal does not want the module path; a program
+                // switching on events does.
+                .json()
+                .with_writer(std::io::stderr)
+                // Both default to on for this formatter; named because a
+                // consumer depends on them. `job_id` reaches an event through
+                // these, and note it is not always in `span`: `install_server_key`
+                // opens a nested `keys.fetch`, so for "server key installed" the
+                // current span is that one and `job_id` appears only in the
+                // list. A parser must read the list, not the innermost span.
+                .with_current_span(true)
+                .with_span_list(true)
+                .init();
+        }
+        Ok("text") | Err(_) => text_format(filter),
+        Ok(other) => {
+            // Deliberately not silent, and deliberately not fatal. A typo that
+            // fell through to the text format would produce perfectly readable
+            // output that a consumer parses as zero events — a failure that
+            // looks like "the system did nothing" rather than like a mistake.
+            eprintln!(
+                "warning: DISCA_LOG_FORMAT={other:?} is not recognised; using the text format. \
+                 Valid values are `json` and `text`."
+            );
+            text_format(filter);
+        }
+    }
+}
+
+/// The human format, unchanged: stdout, no target, colour when attached.
+fn text_format(filter: EnvFilter) {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

@@ -769,21 +769,46 @@ pub fn run(config: Config) -> Result<(), String> {
                     .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
             }
 
+            // Field shapes here are chosen for a machine reading
+            // `DISCA_LOG_FORMAT=json`, and they are not the shapes `?` would
+            // give. `tracing` records a `?field` as its `Debug` string, so
+            // under JSON `?attesters` becomes the *string* `"[\"0x09b8…\"]"`
+            // and `?result_out` becomes `"Some(\"/tmp/…\")"` — structurally
+            // valid JSON whose values need a second parser. A sink like that is
+            // machine-readable only in the sense that a screenshot is.
+            //
+            // So: paths as plain strings, the address list comma-separated so
+            // it splits, and `elapsed_ms` as a number rather than a `u128`
+            // (which `tracing` has no primitive for and would also stringify).
+            let attesters = settlement
+                .attesters
+                .iter()
+                .map(|attester| attest::hex_address(&attester.address))
+                .collect::<Vec<_>>()
+                .join(",");
+            let path_field = |path: &Option<PathBuf>| {
+                path.as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            };
+
             info!(
+                // The job id is the correlation key, and it was missing here:
+                // `run` logs this outside the job span, so before this line the
+                // most important event in the system carried no way to say
+                // which job it belonged to. Harmless while a coordinator ran
+                // exactly one job; wrong the moment it serves several.
+                job_id,
                 result_bytes = sealed.blob.len(),
-                result_out = ?config.result_out,
-                attestations_out = ?config.attestations_out,
+                result_out = path_field(&config.result_out),
+                attestations_out = path_field(&config.attestations_out),
                 result_hash = %bytecode::hex(&sealed.hash),
                 // Recovered, not asserted. `fulfillJob` takes the *signatures*
                 // rather than these addresses (`bridge.md` §2) and recovers
                 // them itself; the signatures are the ones `--attestations`
                 // writes, under exactly these addresses.
-                attesters = ?settlement
-                    .attesters
-                    .iter()
-                    .map(|attester| attest::hex_address(&attester.address))
-                    .collect::<Vec<_>>(),
-                elapsed_ms = started.elapsed().as_millis(),
+                attesters = %attesters,
+                elapsed_ms = started.elapsed().as_millis() as u64,
                 "job settled"
             );
             Ok(())
