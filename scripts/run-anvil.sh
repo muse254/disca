@@ -1173,8 +1173,7 @@ printf '   attestation source: %s\n' "$source_label"
 if [ "$SETTLE" = watcher ]; then
   printf '   this script sent %d transaction(s), and %s was not one of them:\n' \
     "${#SENT_TX[@]}" "$settle_tx"
-  # shellcheck disable=SC2016  # the backticks quote a command name in prose.
-  printf '   job %s was settled by `node watcher`, off the chain'"'"'s own JobRequested.\n' "$JOB_ID"
+  printf "   job %s was settled by \`node watcher\`, off the chain's own JobRequested.\n" "$JOB_ID"
 fi
 if [ "$NETWORK" = synthetic ]; then
   printf '   synthetic: the contracts and the script were exercised; the FHE was not.\n'
