@@ -8,6 +8,28 @@ Claims below are marked **[verified]** where they come from reading the code (fi
 and line given) and **[inferred]** where they are a judgement about what would
 happen next. Nothing here is a restatement of `tasks.md`.
 
+## Most of this has happened, and the file has an expiry
+
+**Steps 1 through 5 of §4 are built** — signed attestations (2.10i), the key
+holder split into `disca-cli` (4.3), the coordinator as a job service (Track
+2d), the bridge with signature-checked settlement (3.1, 3.2, 3.5, 4.2), and the
+alloy watcher (3.4). §2.1's finding — that an attester list the coordinator
+supplies makes on-chain M-of-N decorative — was correct, and the fix is what
+`bridge.md` §2a now specifies. §2.3's "the coordinator holds the client key
+*and* the plaintext" is no longer true of either.
+
+**What has not happened** is §3's recommendations about over-build (`logic_gates`
+is still behind its feature, 2.10g is still filed), §2.6's `envDigest` at
+registration, and §2.5's second half: `bytecode_hash` reaches a worker now, but
+`Claim::preimage` still does not bind the input commitments (task 2c.4).
+
+**This file is an assessment, not a design document, and it is dated.** It was
+written against `f5e936d`; where it disagrees with `architecture.md`,
+`bridge.md` or the code, they are right and it is stale. Its findings belong in
+those documents, and the ones that mattered are already there. It should be
+deleted once §3 and §2.6 are settled either way — a third source of truth about
+the bridge is worth less than the two that are kept current.
+
 ---
 
 ## 1. The recommendation in one paragraph

@@ -256,10 +256,13 @@ Two consequences that are easy to miss:
    any slashing or reputation logic punish honest participants. Pinned, it
    fires only on the faulty worker — but see architecture.md §3 on mixed-ISA
    fleets before treating it as proof of dishonesty.
-2. **`bridge.md` §2 is now stale.** It states "Because FHE evaluation is
-   deterministic, agreement implies correct evaluation." That premise is false
-   as measured, and the sentence should be corrected along with whichever
-   replacement scheme is chosen.
+2. ~~**`bridge.md` §2 is now stale.**~~ **Corrected.** It said "Because FHE
+   evaluation is deterministic, agreement implies correct evaluation", and the
+   premise is false as measured. §2 now says byte-reproducible *under the
+   conditions in `architecture.md` §3* and lists them inline — pinned FFT plan,
+   one CPU architecture, CPU not GPU — rather than leaving "deterministic" to
+   carry weight it cannot. The conditions belonging in the worker registry
+   rather than in prose is still open, as task 2.10b.
 
 Adjudicating on the decrypted plaintext remains the fallback if byte equality
 ever proves unreliable again (mixed architectures being the known risk) (options and costs in `architecture.md` §3, recorded as tasks

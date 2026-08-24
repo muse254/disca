@@ -309,18 +309,25 @@ disca/
     src/bytecode.rs     #   canonical encoding + keccak256 program hash
     src/wire.rs         #   ciphertext boundary, commitments, SealedResult
     examples/           #   size_probe, inspect, cross_process, key_probe
-  node/                 # coordinator | worker | demo roles
-    src/coordinator.rs  #   job prep, fan-out, M-of-N aggregation, key holder
-    src/worker.rs       #   validate, evaluate, seal, report
+    src/attest.rs       #   secp256k1 attestations: Claim, preimage, recover
+  node/                 # coordinator | worker | watcher | demo roles
+    src/coordinator.rs  #   job service: per-job state, M-of-N, attestation export
+    src/worker.rs       #   validate, evaluate, seal, sign, report
+    src/watcher.rs      #   JobRequested -> verify commitments -> accept_job -> fulfillJob
     src/protocol.rs     #   messages; src/transport.rs — sync HTTP
-  disca-cli/            # parse wasm->bytecode; keygen (still stubs)
+  disca-cli/            # the key holder: keygen, compile, encrypt, decrypt
+  bridge/               # Foundry: DiscaBridge.sol, CommitteeTally.sol, script/
+  spec/                 # TLA+ model of attestation and settlement, + drift check
   committee-tally/      # demo circuit; simple-arithmetic/ — sample program
   scripts/run-local.sh  # 1 coordinator + 3 workers, one deliberately faulty
+  scripts/run-anvil.sh  # the same, against a chain; --watcher settles it
   docs/                 # this file, bridge.md, attestation.md, tasks.md,
-                        # tfhe-determinism-request.md
+                        # next-architecture.md, tfhe-determinism-request.md
 ```
 
-Not yet built: `bridge/` (Foundry project — Track 3) and the chain watcher.
+Everything above is built. What the ladder in §7 still calls roadmap — the
+challenge window, threshold decryption, ZK evaluation proofs — is not, and
+neither is multi-key FHE (§2).
 
 ## 9. Scope fence for the 12 days
 
@@ -362,6 +369,20 @@ Purest privacy story, less visual.
    verifier recovers the signer; the registry still decides whose signature
    counts. Layout and the contract-side checks: `bridge.md` §2a; what was wrong
    with the original and what the fix costs: §2b.
-4. Transport: HTTP/JSON with bincode payloads (simplest) vs gRPC. Leaning: HTTP.
-5. Chain target for the video: local Anvil (deterministic) vs L2 testnet
-   (more impressive). Plan: Anvil for dev, testnet deploy as stretch.
+4. ~~Transport: HTTP/JSON with bincode payloads (simplest) vs gRPC. Leaning:
+   HTTP.~~ **Confirmed as leaned.** Threaded sync HTTP (`tiny_http`), with
+   length-prefixed blobs beside JSON control fields. Evaluation is CPU-bound and
+   blocking — a tally is ~1 s, a multiply ~2 s — so async bought nothing at
+   three workers, and blocking FHE work inside a handler is honest rather than
+   something to design around. Revisit if a coordinator ever needs many
+   concurrent connections; the job service (Track 2d) is what would make that
+   worth doing.
+5. ~~Chain target for the video: local Anvil (deterministic) vs L2 testnet.~~
+   **Anvil, and it is built** — `scripts/run-anvil.sh --watcher` deploys,
+   registers, posts, evaluates, settles and decrypts in about thirteen seconds.
+   A testnet deploy is still the stretch it always was, and is now a deployment
+   exercise rather than a design question.
+
+Nothing in this section is open. It is kept rather than deleted because three of
+the five were resolved *against* their stated leaning, and the reasoning is
+worth more than the conclusion.
