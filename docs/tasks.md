@@ -112,6 +112,22 @@ Cheap, and unblocks estimating everything downstream.
 
       Now possible and worth doing: `scripts/run-anvil.sh`'s `strip_ansi` and
       its three `sed` scrapes can become `jq`.
+
+## Track 2 — Node roles and transport (`node/`)
+
+This is the first work that adds real network surface. The execution core it
+sits on is finished: bytecode encodes and decodes with validation on receipt
+(1.4), the ciphertext boundary and the hash workers attest to are in place
+(1.2), and deterministic evaluation is verified rather than assumed. What
+remains is moving those artifacts between processes.
+
+**Not in this track:** the chain watcher (that is 3.4, and needs the contract to
+exist first), persistence, and any authentication beyond the worker registry.
+Track 2 ends at three local processes agreeing on a result with no chain
+involved.
+
+### 2.0 Decisions to settle before writing code
+
 - [x] **2.0a HTTP library.** Evaluation is CPU-bound and blocking — a tally is
       ~1 s, a multiply ~2 s — so async buys very little at three workers.
       Recommend a threaded sync server (`tiny_http`) over `axum` + `tokio`:
