@@ -10,8 +10,11 @@ who stood behind an answer rather than taking the coordinator's word for it
 ([bridge.md](docs/bridge.md) §2a).
 
 New here? [getting-started.md](docs/getting-started.md) is the operator's path:
-prerequisites, the one command, and the same thing done by hand so you can see
-where each key and each ciphertext goes. Running it on more than one machine is
+prerequisites, the one command, the same thing done by hand so you can see where
+each key and each ciphertext goes, and
+[running a program you wrote](docs/getting-started.md#running-your-own-program)
+— what a circuit is allowed to contain, and the four commands from `.rs` to a
+decrypted answer. Running it on more than one machine is
 where byte-reproducibility stops being free; what has to match is in
 [architecture.md](docs/architecture.md) §3, and the experiment that would settle
 the one open question is in [tasks.md](docs/tasks.md) 5.3.
@@ -336,13 +339,37 @@ the release notes, and panicking if called late. The draft is in
 The description of the Disca protocol and its design rationale, in `paper/`.
 Built with XeLaTeX.
 
-The paper describes the protocol; it is not the formal specification. That is
-[`spec/`](spec/) — a TLA+ model of M-of-N attestation and settlement, checked by
-TLC across 30 configurations, half of which are counterexamples that are
-*supposed* to fail. It found two bugs in this repository. It is also pinned to
-the code it models: `make -C spec drift` fails when a modelled function changes,
-because a model that keeps passing while the code moves underneath it is worse
-than no model at all.
+The paper describes the protocol. It is not the formal specification — that is
+[`spec/`](spec/), a TLA+ model of M-of-N attestation and settlement checked by
+TLC across 30 configurations in about 45 seconds, guarding `QuorumIsReal`,
+`EscrowPaidOnce`, `NoSettleOnSplit`, `VoteNotDisplaced`,
+`SomeoneActuallyEvaluated` and liveness.
+
+Half those configurations are **supposed to fail**. Each removes one decision
+the implementation makes and asserts that TLC then finds the specific
+counterexample that decision exists to prevent, so `spec/check.sh` fails both
+when a run reports an unexpected error *and* when one stops reporting its
+expected one. That distinction is the whole point: a suite that only checks for
+"no errors" cannot tell a proof from a model that has quietly stopped modelling
+anything.
+
+It found two real bugs, both since fixed. A minority quorum could settle during
+the straggler grace period before honest workers had reported, which is why
+`2M > N` is now enforced at startup. And a constant job id made attestations
+interchangeable between runs, so a replay could *pre-empt* every honest worker
+rather than merely displace one — first-write-wins is no defence against
+arriving first. Job ids are per-run because of it.
+
+It is pinned to the code it models. `spec/models.toml` hashes each modelled
+function and `make -C spec drift` fails when one changes, naming what the spec
+used it for. CI runs that before TLC, because it catches the failure TLC
+structurally cannot: a model that is internally consistent and externally wrong.
+
+What it does **not** cover is written down rather than left to be assumed. The
+model is single-job with N ≤ 4, and the correspondence to the Rust is a careful
+reading plus that hash tripwire — there is no extraction and no refinement
+proof. Concurrent jobs, multiple chain ids, registration and gas are not
+modelled at all (tasks 2c.5 and 2d.4).
 
 ### Setup
 
