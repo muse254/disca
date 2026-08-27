@@ -174,9 +174,19 @@ pub fn get_status(url: &str) -> Result<(u16, Vec<u8>), String> {
     Ok((status, body))
 }
 
+/// `http_status_as_error(false)` because a non-2xx is an answer here, not a
+/// transport failure, and every caller in this module already decides what to
+/// do with the status itself.
+///
+/// Without it `ureq` turns a 4xx into `Err` before the response body is read,
+/// which made [`post_for_body`]'s refusal branch unreachable: a coordinator
+/// answering `400 the program exports no function named tally5_select` reached
+/// the client as `http status: 400`. The reason was written, sent, and thrown
+/// away one layer above the caller who needed it.
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
+        .http_status_as_error(false)
         .build()
         .into()
 }

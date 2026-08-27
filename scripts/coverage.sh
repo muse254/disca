@@ -75,6 +75,24 @@ REPORT_ARGS=(
   '((committee-tally|ping-pong|simple-arithmetic)/lib\.rs|/examples/)'
 )
 
+# Stale profile data is merged, not replaced, and the result is a number that
+# only ever moves upward. Two coverage runs in one checkout -- or one run after
+# the tool itself is upgraded -- leave `.profraw` files and instrumented
+# binaries from the earlier build behind, and `llvm-cov report` sums them: the
+# same source line is counted once per surviving binary. It reads as better
+# coverage, which is the direction nobody investigates.
+#
+# This is not hypothetical. It reported node at 63.9% on a laptop while CI,
+# which starts from an empty runner every time, reported 47.2% for the same
+# commit -- and CI was right. A local gate that disagrees with the CI gate in
+# the flattering direction is worse than no local gate, because it is trusted.
+#
+# `clean --workspace` drops workspace artifacts and profile data and keeps the
+# dependency build, so the expensive part -- tfhe -- is still warm. Measured
+# cost of adding it: nothing outside the noise, ~65 s either way.
+echo "==> clearing stale profile data"
+cargo llvm-cov clean --workspace
+
 echo "==> running the test suite under instrumentation"
 # Note for whoever touches this next: primitives/tests/determinism_under_concurrency.rs
 # re-executes the test binary as concurrent children. That is safe under
