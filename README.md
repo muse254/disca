@@ -27,6 +27,70 @@ must be pinned to be reproducible)
 Design decisions carry a pointer to the pull request that produced them, so the
 reasoning and the dead ends stay recoverable rather than only the conclusion.
 
+## How data moves
+
+One job, end to end. The thing to follow is which box ever holds a key that can
+decrypt: exactly one, and it is never on the network.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant KH as Key holder<br/>disca-cli
+    participant CH as Chain<br/>DiscaBridge.sol
+    participant WA as Watcher<br/>node watcher
+    participant CO as Coordinator
+    participant WK as Workers ×N
+
+    Note over KH: the client key is generated here<br/>and never leaves this box
+    KH->>KH: compile program.wasm → bytecode + bytecodeHash
+    KH->>KH: encrypt the inputs under the client key
+
+    KH->>CH: registerProgram(bytecodeHash, M)
+    KH->>CH: submitJob(commitments, input blobs) + escrow
+    CH-->>WA: JobRequested
+
+    WA->>CH: read the commitments from contract storage
+    Note over WA: each input blob is checked against the commitment<br/>the chain holds, not the one it was handed
+    WA->>CO: accept_job(jobId, bytecode, ciphertext)
+
+    CO->>WK: POST /jobs — bytecode + ciphertext
+    WK->>CO: GET /keys/{serverKeyHash} — pulled once, cached by hash
+    Note over WK: evaluation runs on ciphertext. the server key<br/>can evaluate, and cannot decrypt
+    WK->>CO: POST /results — resultHash + secp256k1 signature
+
+    Note over CO: settles when M of N workers sign the same<br/>byte-identical result. a worker that disagrees<br/>simply fails to join a quorum
+    CO-->>WA: winning blob + M attestations
+
+    WA->>CH: fulfillJob(jobId, resultHash, blob, signatures)
+    CH-->>KH: JobFulfilled(blob)
+    KH->>KH: decrypt under the client key
+```
+
+Three properties are visible in the arrows rather than asserted beside them.
+
+**The client key appears twice and never moves.** It encrypts at step 2 and
+decrypts at step 14, both inside the key holder. The key that travels to the
+workers at step 9 is the *server* key: it can evaluate a circuit over ciphertext
+and cannot open it, which is why serving it to anyone who asks for it by hash
+costs nothing.
+
+**Nobody is trusted to report their own work.** A result is accepted at step 11
+because M workers independently produced the *same bytes* and each signed a
+claim binding the job, the program and the result. A worker that diverges —
+lying, or merely misconfigured — fails to join a quorum, and the job expires
+into a refund rather than settling wrongly.
+
+**The watcher re-derives what it verifies.** At step 6 it checks each input blob
+against the commitment in contract storage rather than against the dispatch it
+was handed, so an endpoint that fabricates a log has to fabricate the job it
+names too.
+
+Without a chain — which is what `run-local.sh` and `run-pong.sh disca` do —
+steps 3 to 7 collapse into the key holder's own `POST /jobs`, and steps 11 to 13
+into `GET /result/<jobId>`. Everything between the coordinator and the workers is
+identical, which is the point: the chain decides who gets paid, not what the
+answer is.
+
 ## Running it
 
 Three worker processes evaluate an encrypted committee tally; the coordinator
