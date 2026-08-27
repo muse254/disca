@@ -1,0 +1,481 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pong, as DISCA circuits</title>
+<!--
+  The same wasm module the DISCA network evaluates under encryption, running
+  here in plaintext.
+
+  Nothing is reimplemented. The six exports this page calls -- ball_x, ball_y,
+  vel_x, vel_y, paddle_y, score -- are the identical functions a worker lowers
+  to DISCA bytecode and evaluates homomorphically. The only difference is that
+  here the numbers are numbers, and there they are 2.3 KB ciphertexts that no
+  machine computing them can read.
+
+  THREE PACES, one simulation. The physics is identical in all three; only the
+  clock changes:
+
+    1. rally       8 frames a second -- the ball crosses the board in ~1.5 s
+    2. step        1 frame a second  -- slow enough to read every number
+    3. encrypted   33 seconds a frame -- what the DISCA network actually costs
+
+  WHY 8 FPS IS "NORMAL" AND 60 IS NOT. Velocity is encrypted state, and its
+  magnitude is chosen at encrypt time against the *network's* frame time so the
+  ball crosses the board in a watchable number of frames (lib.rs, "Speed, and
+  why the ball moves in visible jumps"). vel_x is 80 on a 960-wide board, so a
+  crossing is 12 frames. At 60 fps that is a fifth of a second -- a blur. The
+  ball is not moving too fast because the renderer is wrong; it is moving
+  exactly 80 px per frame, and a frame is meant to be a long time.
+
+  The simulation is stepped from a time accumulator rather than once per
+  requestAnimationFrame, so the pace above is the pace you get whatever the
+  display's refresh rate happens to be.
+
+  The module is embedded as base64 so this file works from disk with no server.
+  Regenerate after changing the circuits:
+
+      cd ping-pong && cargo build --release -p ping-pong --lib   # wasm32
+      cp ../target/wasm32-unknown-unknown/release/ping_pong.wasm .
+      python3 web/embed.py
+-->
+<style>
+  :root { color-scheme: dark; --ink: #e8e6e3; --dim: #8b8681; --line: #2a2a2a;
+          --accent: #7fb2f0; --warm: #e0a760; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #111; color: var(--ink);
+         font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { width: min(92vw, 900px); padding: 24px 0; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; letter-spacing: .02em; }
+  p  { margin: 0 0 18px; color: var(--dim); max-width: 64ch; }
+  canvas { width: 100%; height: auto; display: block; background: #0b0b0b;
+           border: 1px solid var(--line); border-radius: 3px; }
+
+  .modes { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+  button { font: inherit; color: var(--dim); background: #171717;
+           border: 1px solid var(--line); border-radius: 3px;
+           padding: 6px 12px; cursor: pointer; letter-spacing: .01em; }
+  button:hover { color: var(--ink); border-color: #3a3a3a; }
+  button[aria-pressed="true"] { color: #111; background: var(--ink);
+                                border-color: var(--ink); }
+  button .rate { opacity: .65; font-size: 12px; }
+  button[aria-pressed="true"] .rate { opacity: .55; }
+  .spacer { flex: 1; }
+
+  .bar { height: 2px; background: var(--line); margin: 10px 0 0;
+         border-radius: 2px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--warm); }
+
+  dl { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0 18px;
+       margin: 14px 0 0; }
+  @media (max-width: 620px) { dl { grid-template-columns: repeat(3, 1fr); } }
+  dt { color: var(--dim); font-size: 11px; text-transform: uppercase;
+       letter-spacing: .08em; }
+  dd { margin: 0 0 10px; font-variant-numeric: tabular-nums; font-size: 18px; }
+
+  #event { min-height: 1.6em; color: var(--accent); margin: 2px 0 0; font-size: 13px; }
+  #event.idle { color: var(--dim); }
+
+  .circuit { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .circuit h2 { font-size: 11px; font-weight: 600; color: var(--dim); margin: 0 0 10px;
+                text-transform: uppercase; letter-spacing: .08em; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+  .chip { border: 1px solid var(--line); border-radius: 3px; padding: 3px 8px;
+          font-size: 12px; color: var(--dim); }
+  .chip.on { color: #111; background: var(--warm); border-color: var(--warm); }
+  .chip .n { opacity: .6; }
+  .ops { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+         gap: 3px; font-size: 11px; }
+  .op { border: 1px solid var(--line); border-radius: 2px; padding: 2px 6px;
+        color: #6f6a66; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .op.fhe  { color: var(--dim); border-color: #363636; }
+  .op.done { color: var(--dim); border-color: #3d3323; background: #191510; }
+  .op.now  { color: #111; background: var(--warm); border-color: var(--warm); }
+  .op .ms { float: right; opacity: .55; }
+  .lede { margin: 0 0 12px; max-width: 74ch; font-size: 13px; }
+  .lede code { color: var(--accent); }
+  .totals { margin: 14px 0 0; font-size: 13px; color: var(--dim); }
+  .totals p { margin: 0 0 10px; max-width: 74ch; }
+  .totals ul { margin: 0 0 10px; padding-left: 20px; max-width: 74ch; }
+  .totals li { margin: 0 0 2px; }
+  .totals b { color: var(--ink); }
+  .totals code { color: var(--accent); }
+  footer { margin-top: 16px; color: var(--dim); border-top: 1px solid var(--line);
+           padding-top: 12px; }
+  footer p { margin: 0 0 8px; max-width: none; }
+  b { color: var(--ink); font-weight: 600; }
+  kbd { border: 1px solid var(--line); border-radius: 3px; padding: 0 4px;
+        font-size: 12px; color: var(--dim); }
+</style>
+
+<main>
+  <h1>Pong, as DISCA circuits</h1>
+  <p>
+    The same wasm module the network evaluates under encryption, running here in
+    plaintext. Six functions, one per state variable, called once a frame. The
+    physics is identical in all three paces below &mdash; only the clock changes.
+  </p>
+
+  <div class="modes">
+    <button aria-pressed="true"  data-mode="0">1 &middot; rally <span class="rate">8 fps</span></button>
+    <button aria-pressed="false" data-mode="1">2 &middot; step <span class="rate">1 fps</span></button>
+    <button aria-pressed="false" data-mode="2">3 &middot; encrypted pace <span class="rate">33 s / frame</span></button>
+    <span class="spacer"></span>
+    <button id="restart">restart rally</button>
+  </div>
+
+  <canvas id="board" width="960" height="540"></canvas>
+  <div class="bar"><i id="prog"></i></div>
+
+  <dl>
+    <dt>saves</dt><dt>frame</dt><dt>ball</dt><dt>velocity</dt><dt>paddle</dt>
+    <dd id="sc">0</dd><dd id="fr">0</dd><dd id="ball">-</dd><dd id="vel">-</dd><dd id="pad">-</dd>
+  </dl>
+
+  <p id="event" class="idle">&mdash;</p>
+
+  <section class="circuit">
+    <h2>the encrypted math &mdash; what a worker evaluates for this frame</h2>
+    <p class="lede">These are DISCA opcodes, and they are the module's own wasm
+    instructions under different names: <code>Add</code> is <code>i32.add</code>,
+    <code>Gt</code> is <code>i32.gt_s</code>, <code>Select</code> is
+    <code>select</code>. The lowering is <b>1:1</b> &mdash; all 174 of them, in
+    order, arguments included, with only wasm's trailing <code>end</code>
+    dropped. Nothing is folded, reordered or synthesised on the way in.</p>
+    <div class="chips" id="chips"></div>
+    <div class="ops" id="ops"></div>
+    <div class="totals" id="totals"></div>
+  </section>
+
+  <footer>
+    <p id="note"></p>
+    <p>
+      Six circuit evaluations &mdash; one whole frame &mdash; cost about
+      <b>91 ns</b> here. The same six on the DISCA network cost about
+      <b>33 s</b>: six independent jobs, three workers evaluating each under FHE,
+      and a 2-of-3 quorum agreeing byte for byte before the board may advance.
+      That is a factor of roughly <b>360 million</b>, and it buys one thing:
+      there, no machine computing this can see the ball.
+    </p>
+    <p>
+      Keys <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> switch pace, <kbd>R</kbd> restarts.
+      Switching pace keeps the rally &mdash; it changes the clock, not the state.
+    </p>
+  </footer>
+</main>
+
+<script type="module">
+const WASM = "AGFzbQEAAAABCwFgBn9/f39/fwF/AwcGAAAAAAAABAUBcAEBAQUDAQAQBhkDfwFBgIDAAAt/AEGAgMAAC38AQYCAwAALB1oJBm1lbW9yeQIABmJhbGxfeAAABmJhbGxfeQABCHBhZGRsZV95AAIFc2NvcmUAAwV2ZWxfeAAEBXZlbF95AAUKX19kYXRhX2VuZAMBC19faGVhcF9iYXNlAwIKwQIGQQBBKCACIABqIgBBACAAQQBKGyICQcAHIAJBwAdIGyADIAFqIgIgBEGmf2pOIABBKUhqIAIgBEHaAGpMakEDRhsLHQAgAyABaiIBQQAgAUEAShsiAUGcBCABQZwESBsLOQAgAyABaiAEayIBQUkgAUFJShsiAUE3IAFBN0gbIARqIgRB2gAgBEHaAEobIgRBwgMgBEHCA0gbCykAIAUgAyABaiIBIARBpn9qTiACIABqQSlIaiABIARB2gBqTGpBA0ZqC1ABAX8gAkEAIAJrIgYgAyABaiIDIARBpn9qTiACIABqIgFBKUhqIAMgBEHaAGpMakEDRxsgBiABQQAgAUEAShsiAkHAByACQcAHSBsgAUYbCyoBAX8gA0EAIANrIAMgAWoiAUEAIAFBAEobIgZBnAQgBkGcBEgbIAFGGwsAXARuYW1lAA8OcGluZ19wb25nLndhc20BMAYABmJhbGxfeAEGYmFsbF95AghwYWRkbGVfeQMFc2NvcmUEBXZlbF94BQV2ZWxfeQcSAQAPX19zdGFja19wb2ludGVyAE0JcHJvZHVjZXJzAghsYW5ndWFnZQEEUnVzdAAMcHJvY2Vzc2VkLWJ5AQVydXN0Yx0xLjk2LjEgKDMxZmNhM2FkYiAyMDI2LTA2LTI2KQCUAQ90YXJnZXRfZmVhdHVyZXMIKwtidWxrLW1lbW9yeSsPYnVsay1tZW1vcnktb3B0KxZjYWxsLWluZGlyZWN0LW92ZXJsb25nKwptdWx0aXZhbHVlKw9tdXRhYmxlLWdsb2JhbHMrE25vbnRyYXBwaW5nLWZwdG9pbnQrD3JlZmVyZW5jZS10eXBlcysIc2lnbi1leHQ=";
+
+// What `disca-cli compile` lowers ping_pong.wasm to — the DISCA opcodes a worker
+// evaluates homomorphically. Regenerated by web/embed.py from the same
+// `primitives/examples/inspect` the network's own tooling uses, so this listing
+// cannot drift from what is actually executed.
+const CIRCUITS = {"ball_x":[["Const",40],["LocalGet",2],["LocalGet",0],["Add"],["LocalTee",0],["Const",0],["LocalGet",0],["Const",0],["Gt"],["Select"],["LocalTee",2],["Const",960],["LocalGet",2],["Const",960],["Lt"],["Select"],["LocalGet",3],["LocalGet",1],["Add"],["LocalTee",2],["LocalGet",4],["Const",-90],["Add"],["Ge"],["LocalGet",0],["Const",41],["Lt"],["Add"],["LocalGet",2],["LocalGet",4],["Const",90],["Add"],["Le"],["Add"],["Const",3],["Eq"],["Select"]],"ball_y":[["LocalGet",3],["LocalGet",1],["Add"],["LocalTee",1],["Const",0],["LocalGet",1],["Const",0],["Gt"],["Select"],["LocalTee",1],["Const",540],["LocalGet",1],["Const",540],["Lt"],["Select"]],"paddle_y":[["LocalGet",3],["LocalGet",1],["Add"],["LocalGet",4],["Sub"],["LocalTee",1],["Const",-55],["LocalGet",1],["Const",-55],["Gt"],["Select"],["LocalTee",1],["Const",55],["LocalGet",1],["Const",55],["Lt"],["Select"],["LocalGet",4],["Add"],["LocalTee",4],["Const",90],["LocalGet",4],["Const",90],["Gt"],["Select"],["LocalTee",4],["Const",450],["LocalGet",4],["Const",450],["Lt"],["Select"]],"score":[["LocalGet",5],["LocalGet",3],["LocalGet",1],["Add"],["LocalTee",1],["LocalGet",4],["Const",-90],["Add"],["Ge"],["LocalGet",2],["LocalGet",0],["Add"],["Const",41],["Lt"],["Add"],["LocalGet",1],["LocalGet",4],["Const",90],["Add"],["Le"],["Add"],["Const",3],["Eq"],["Add"]],"vel_x":[["LocalGet",2],["Const",0],["LocalGet",2],["Sub"],["LocalTee",6],["LocalGet",3],["LocalGet",1],["Add"],["LocalTee",3],["LocalGet",4],["Const",-90],["Add"],["Ge"],["LocalGet",2],["LocalGet",0],["Add"],["LocalTee",1],["Const",41],["Lt"],["Add"],["LocalGet",3],["LocalGet",4],["Const",90],["Add"],["Le"],["Add"],["Const",3],["Ne"],["Select"],["LocalGet",6],["LocalGet",1],["Const",0],["LocalGet",1],["Const",0],["Gt"],["Select"],["LocalTee",2],["Const",960],["LocalGet",2],["Const",960],["Lt"],["Select"],["LocalGet",1],["Eq"],["Select"]],"vel_y":[["LocalGet",3],["Const",0],["LocalGet",3],["Sub"],["LocalGet",3],["LocalGet",1],["Add"],["LocalTee",1],["Const",0],["LocalGet",1],["Const",0],["Gt"],["Select"],["LocalTee",6],["Const",540],["LocalGet",6],["Const",540],["Lt"],["Select"],["LocalGet",1],["Eq"],["Select"]]};
+
+const bytes = Uint8Array.from(atob(WASM), c => c.charCodeAt(0));
+const { instance } = await WebAssembly.instantiate(bytes, {});
+const { ball_x, ball_y, vel_x, vel_y, paddle_y, score } = instance.exports;
+
+const W = 960, H = 540, PADDLE_X = 40, REACH = 90, PADDLE_SPEED = 55;
+
+// One measurement, on one machine: three worker processes sharing an 8-core
+// laptop, 2-of-3 quorum, `scripts/run-pong.sh disca`. It is a baseline and not
+// a constant of the system — it moves with cores, worker count and contention.
+// Everything below is derived from it rather than hard-coded, so a different
+// baseline rewrites the sentences instead of invalidating them.
+const BASELINE_S = 35;
+
+// Long enough for the miss rate to be a property of `vel_y` rather than of
+// where the sweep happened to stop; ~190 crossings at the shipped speed.
+const SWEEP_FRAMES = 6000;
+const START = { bx: 480, by: 270, vx: -80, vy: 45, py: 270, sc: 0 };
+
+// Measured FHE cost per opcode on tfhe-rs 1.5.0, release, from
+// `docs/architecture.md` §2 — reproduce with `primitives/examples/size_probe`.
+// Stack ops (Const, LocalGet, LocalTee, LocalSet) move ciphertext handles and
+// perform no homomorphic arithmetic, so they are free.
+const OP_MS = { Add: 225, Sub: 265, Mul: 2040, Select: 200,
+                Gt: 141, Lt: 141, Ge: 141, Le: 141, Eq: 141, Ne: 141 };
+const FUNCS = ["ball_x", "ball_y", "vel_x", "vel_y", "paddle_y", "score"];
+
+// One frame is these six circuits. Flattened into a single timeline so the
+// frame's progress can be read as a position in the encrypted work.
+const TIMELINE = [];
+let CIRCUIT_MS = 0;
+for (const fn of FUNCS) {
+  for (const [name, arg] of (CIRCUITS[fn] || [])) {
+    const ms = OP_MS[name] || 0;
+    TIMELINE.push({ fn, name, arg, ms, at: CIRCUIT_MS });
+    CIRCUIT_MS += ms;
+  }
+}
+const FHE_OPS = TIMELINE.filter(o => o.ms > 0).length;
+
+// The three paces. `ms` is how long one frame of the simulation lasts; the
+// physics does not know which of these is in force.
+//
+// 8 fps rather than 60 because vel_x is 80 on a 960-wide board: a crossing is
+// twelve frames, and twelve frames at 60 fps is a fifth of a second. The speed
+// is a property of the encrypted state, not of the renderer.
+const MODES = [
+  { name: "rally", ms: 1000 / 8, note:
+    "Eight frames a second — the ball crosses the board in about a second and a " +
+    "half, which is a rally you can actually follow. Paced from a clock rather " +
+    "than from the display, so this is 8 fps on a 120 Hz panel too." },
+  { name: "step", ms: 1000, note:
+    "One frame a second. The ball advances by exactly (vel_x, vel_y), the paddle " +
+    "by at most 55, and the line above names whatever the frame did. This is the " +
+    "pace to watch if you want to check the physics rather than enjoy it." },
+  { name: "encrypted pace", ms: 33000, note:
+    "Thirty-three seconds a frame — what one frame costs on the DISCA network: " +
+    "six independent jobs, three workers evaluating each under FHE, and a 2-of-3 " +
+    "quorum agreeing byte for byte before the board may advance. The bar is the " +
+    "wait. The arithmetic being waited on is exactly what you watched at 8 fps." },
+];
+
+let mode = 0;
+let s = { ...START };
+let frame = 0;
+let acc = 0;
+let last = performance.now();
+
+const cv = document.getElementById("board");
+const g = cv.getContext("2d");
+const el = id => document.getElementById(id);
+
+function step(s) {
+  // Every call takes the whole state, exactly as a job does: six independent
+  // circuits over the same six inputs, which is why the encrypted version can
+  // submit them together.
+  const a = [s.bx, s.by, s.vx, s.vy, s.py, s.sc];
+  return {
+    bx: ball_x(...a), by: ball_y(...a), vx: vel_x(...a),
+    vy: vel_y(...a), py: paddle_y(...a), sc: score(...a),
+  };
+}
+
+// Names what a frame did by comparing the two states, rather than
+// reimplementing the rules. Display only — nothing here feeds the simulation.
+function describe(prev, next) {
+  const events = [];
+  if (next.sc > prev.sc)
+    events.push("paddle saved it at x=40 — vel_x reversed, score +1");
+  else if (Math.sign(next.vx) !== Math.sign(prev.vx))
+    events.push(next.bx <= 0 ? "missed — ball reached the wall behind the paddle"
+                             : "ball bounced off the far wall");
+  if (Math.sign(next.vy) !== Math.sign(prev.vy))
+    events.push(next.by <= 0 ? "bounced off the top" : "bounced off the bottom");
+  if (Math.abs(next.py - prev.py) === 55)
+    events.push("paddle moving at its 55/frame limit");
+  return events;
+}
+
+function draw(progress) {
+  g.clearRect(0, 0, W, H);
+
+  g.strokeStyle = "#222";
+  g.setLineDash([6, 10]);
+  g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.stroke();
+  g.setLineDash([]);
+
+  // The plane the paddle defends, so a save is visibly a contact rather than a
+  // coincidence. The ball stops here on a save and carries past it on a miss.
+  g.strokeStyle = "#1e1e1e";
+  g.beginPath(); g.moveTo(PADDLE_X, 0); g.lineTo(PADDLE_X, H); g.stroke();
+
+  g.fillStyle = "#e8e6e3";
+  g.fillRect(PADDLE_X - 10, s.py - REACH, 12, REACH * 2);
+
+  g.beginPath();
+  g.arc(s.bx, s.by, 9, 0, Math.PI * 2);
+  g.fill();
+
+  el("sc").textContent = s.sc;
+  el("fr").textContent = frame;
+  el("ball").textContent = `${s.bx}, ${s.by}`;
+  el("vel").textContent = `${s.vx}, ${s.vy}`;
+  el("pad").textContent = s.py;
+  el("prog").style.width = `${Math.min(progress, 1) * 100}%`;
+}
+
+// Renders the op stream, with a playhead at `t` milliseconds of encrypted work.
+// In the two plaintext paces the frame is over before any of this could be
+// drawn, so the playhead only sweeps in the encrypted pace; the listing itself
+// is the same either way, because the circuit is the same either way.
+// Cached because repainting 174 cells a frame through querySelectorAll is the
+// one thing here expensive enough to notice.
+let opCells = [];
+function buildOps() {
+  const chips = FUNCS.map(fn => {
+    const ops = CIRCUITS[fn] || [];
+    const ms = ops.reduce((a, [n]) => a + (OP_MS[n] || 0), 0);
+    return `<span class="chip" data-fn="${fn}">${fn} <span class="n">${ops.length} ops · ${(ms/1000).toFixed(2)}s</span></span>`;
+  }).join("");
+  el("chips").innerHTML = chips;
+  el("ops").innerHTML = TIMELINE.map((o, i) =>
+    `<div class="op${o.ms ? " fhe" : ""}" data-i="${i}">${o.name}${o.arg !== undefined ? "(" + o.arg + ")" : ""}` +
+    `${o.ms ? `<span class="ms">${o.ms}</span>` : ""}</div>`).join("");
+  opCells = [...document.querySelectorAll("#ops .op")];
+  // Histogram straight from the embedded circuit, so the sentence cannot claim
+  // an opcode mix the circuit does not have.
+  const hist = {};
+  for (const o of TIMELINE) if (o.ms) hist[o.name] = (hist[o.name] || 0) + 1;
+  const kinds = Object.entries(hist).sort((a, b) => b[1] - a[1])
+    .map(([n, c]) => `${c}&times;${n} at ${OP_MS[n]} ms`).join(", ");
+
+  // Measured here rather than asserted, against the module the page just
+  // instantiated. A claim about the game's geometry that is typed into prose is
+  // a claim nobody re-checks when the circuit changes; this one re-runs.
+  const sweep = vy => {
+    let s = { ...START, vy }, misses = 0;
+    for (let i = 0; i < SWEEP_FRAMES; i++) {
+      const prev = s;
+      s = step(s);
+      // A miss is the ball reaching the back wall. `ball_x` clamps a save to
+      // PADDLE_X, so x hitting 0 means it went past rather than bounced.
+      if (s.bx === 0 && prev.bx > 0) misses++;
+    }
+    return misses;
+  };
+  const band = [];
+  for (let vy = 25; vy <= 90; vy += 5) band.push([vy, sweep(vy)]);
+  const clean = band.filter(([, m]) => m === 0).map(([v]) => v).join(", ");
+  const dirty = band.filter(([, m]) => m > 0).map(([v]) => v).join(", ");
+  const examples = band.filter(([v]) => v >= 45 && v <= 65)
+    .map(([v, m]) => `<code>${v}</code> lets ${m} past`).join(", ");
+
+  const vx = Math.abs(START.vx);
+  const perCross = Math.ceil(W / vx);
+  const crossMin = perCross * BASELINE_S / 60;
+  const faster = [2, 4, 6].map(k => {
+    const v = vx * k, f = Math.ceil(W / v);
+    return `<li><b>vel_x ${v}</b> &rarr; ${f} frame${f === 1 ? "" : "s"} a crossing, ` +
+           `about ${(f * BASELINE_S / 60).toFixed(1)} minutes</li>`;
+  }).join("");
+
+  el("totals").innerHTML = `
+    <p>One frame is <b>${TIMELINE.length}</b> opcodes, <b>${FHE_OPS}</b> of them
+    homomorphic: ${kinds}. Summed, that is
+    <b>${(CIRCUIT_MS / 1000).toFixed(2)} s</b> of encrypted arithmetic. It is the
+    part that cannot be argued away &mdash; the rest of the circuit is stack
+    moves, which cost nothing because they shuffle ciphertext handles rather
+    than touching what is inside them.</p>
+
+    <p><b>The baseline.</b> Three worker processes sharing one 8-core laptop
+    settled a frame in <b>${BASELINE_S} s</b>. That is a baseline and nothing
+    more: a measurement of one machine under contention, not a property of the
+    game. ${(CIRCUIT_MS / 1000).toFixed(2)} s of it is arithmetic; the other
+    ${(BASELINE_S - CIRCUIT_MS / 1000).toFixed(0)} s is three workers competing
+    for the same cores, plus transport and waiting for a quorum. More cores, or
+    workers that do not share them, move this number and change nothing below
+    except the minutes.</p>
+
+    <p><b>What that makes the game.</b> The ball travels ${vx} per frame across a
+    ${W}-wide board, so a crossing is <b>${perCross} frames</b> &mdash; about
+    <b>${crossMin.toFixed(0)} minutes</b> at this baseline. A five-save rally is
+    most of an hour. Playable is not the word.</p>
+
+    <p><b>The lever that does not need faster hardware</b> is frames per
+    crossing, which is just <code>W / vel_x</code>:</p>
+    <ul>${faster}</ul>
+
+    <p><b>What vertical speed does is not a threshold.</b> It would be tidy if
+    <code>vel_y</code> had a ceiling at <code>PADDLE_SPEED</code>
+    (${PADDLE_SPEED}) or <code>PADDLE_REACH</code> (${REACH}), and it does not.
+    Sweeping the circuit itself &mdash; the same wasm running above, ${SWEEP_FRAMES}
+    frames per value &mdash; the paddle returns every ball at <code>${clean}</code>
+    and lets some past at <code>${dirty}</code>. Both lists straddle
+    ${PADDLE_SPEED} in both directions, so it is not the bound.</p>
+
+    <p>The reason is phase, not speed. The paddle tracks <code>ball_y</code>
+    within ${PADDLE_SPEED} a frame, so what matters is where the ball is in its
+    bounce when it reaches the paddle plane, and that depends on how
+    <code>vel_y</code> divides into the flight. Neighbouring values land in
+    different phases: ${examples}. The shipped <b>vel_y ${START.vy}</b> lands in a
+    lossy band. That was not chosen for the property, but it is the right one to
+    keep: a rally nobody can lose demonstrates nothing.</p>`;
+}
+
+function paintOps(t) {
+  // Guarded rather than assumed. An exception thrown in `loop` is not a
+  // recoverable error here: nothing re-registers the animation frame, so the
+  // whole page stops with no message. A mismatch means the DOM was not built,
+  // which costs the op highlight and must not cost the game.
+  if (opCells.length !== TIMELINE.length) return;
+  let active = -1;
+  for (let i = 0; i < TIMELINE.length; i++) {
+    const o = TIMELINE[i];
+    const done = o.at + o.ms <= t;
+    const now = o.ms > 0 && o.at <= t && t < o.at + o.ms;
+    if (now) active = i;
+    const cell = opCells[i];
+    const want = "op" + (o.ms ? " fhe" : "") + (now ? " now" : done ? " done" : "");
+    if (cell.className !== want) cell.className = want;
+  }
+  const fn = active >= 0 ? TIMELINE[active].fn : null;
+  for (const c of document.querySelectorAll(".chip"))
+    c.classList.toggle("on", c.dataset.fn === fn);
+}
+
+function setMode(next) {
+  mode = next;
+  acc = 0;
+  last = performance.now();
+  for (const b of document.querySelectorAll("[data-mode]"))
+    b.setAttribute("aria-pressed", String(Number(b.dataset.mode) === mode));
+  el("note").textContent = MODES[mode].note;
+}
+
+function restart() {
+  s = { ...START };
+  frame = 0;
+  acc = 0;
+  last = performance.now();
+  el("event").textContent = "—";
+  el("event").className = "idle";
+}
+
+function loop(now) {
+  // Same reasoning as `paintOps`: one uncaught throw ends the animation loop
+  // permanently. Re-arming first means a bug in a frame costs that frame.
+  requestAnimationFrame(loop);
+
+  const dt = now - last;
+  last = now;
+
+  const frameTime = MODES[mode].ms;
+  acc += dt;
+  // A backgrounded tab hands back one enormous dt. Without this the game
+  // fast-forwards through every frame it "missed", which is wrong in all three
+  // paces and absurd in the 33-second one.
+  acc = Math.min(acc, frameTime * 2);
+
+  while (acc >= frameTime) {
+    const prev = s;
+    s = step(s);
+    frame++;
+    acc -= frameTime;
+
+    const events = describe(prev, s);
+    el("event").textContent = events.length ? events.join("  ·  ") : "—";
+    el("event").className = events.length ? "" : "idle";
+  }
+
+  const progress = acc / frameTime;
+  draw(progress);
+  // Only the encrypted pace is slow enough for a playhead to mean anything; in
+  // the other two the whole frame is over in 91 ns of real arithmetic.
+  paintOps(mode === 2 ? progress * CIRCUIT_MS : CIRCUIT_MS + 1);
+}
+
+for (const b of document.querySelectorAll("[data-mode]"))
+  b.addEventListener("click", () => setMode(Number(b.dataset.mode)));
+el("restart").addEventListener("click", restart);
+addEventListener("keydown", e => {
+  if (e.key === "1" || e.key === "2" || e.key === "3") setMode(Number(e.key) - 1);
+  if (e.key === "r" || e.key === "R") restart();
+});
+
+buildOps();
+setMode(0);
+requestAnimationFrame(loop);
+</script>

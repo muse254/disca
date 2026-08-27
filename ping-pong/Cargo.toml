@@ -1,0 +1,24 @@
+[package]
+name = "ping-pong"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description.workspace = true
+homepage.workspace = true
+
+[lib]
+# `cdylib` is what the wasm32 build needs; `rlib` is what lets the console
+# player call the very same functions natively. One source of truth for the
+# rules of the game: the binary below and the circuits the network evaluates are
+# not two implementations that have to be kept in step.
+crate-type = ["cdylib", "rlib"]
+path = "lib.rs"
+
+# Play it at a normal speed, to see what the encrypted version is a slowed-down
+# recording of. Run from the workspace root -- `.cargo/config.toml` here pins
+# wasm32, which is right for the circuits and wrong for a terminal.
+#
+#     cargo run --release -p ping-pong --bin pong
+[[bin]]
+name = "pong"
+path = "play.rs"

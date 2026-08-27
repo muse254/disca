@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["committee-tally", "disca-cli", "node", "primitives", "simple-arithmetic"]
+members = ["committee-tally", "disca-cli", "node", "ping-pong", "primitives", "simple-arithmetic"]
 
 [workspace.package]
 version = "0.2.0"
