@@ -20,8 +20,20 @@ wincode = { workspace = true }
 tiny_http = { workspace = true }
 ureq = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+# `json` for the machine-readable sink (task 1b.3, `DISCA_LOG_FORMAT=json`).
+# Per-crate rather than in `[workspace.dependencies]`: `disca-cli` uses no
+# tracing at all, and `primitives` is a library that installs no subscriber, so
+# neither can use the feature and neither should pay for it.
+#
+# It costs one crate. `serde` and `serde_json` are already in the graph via
+# `alloy`, so the feature adds only `tracing-serde`.
+tracing-subscriber = { workspace = true, features = ["json"] }
 # The chain half (task 3.4). Only `watcher.rs` uses these; every other role in
 # this binary still runs with no chain at all.
 alloy = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+# `tests/json_logs.rs` only. The binary emits JSON through `tracing-subscriber`
+# and never parses any, so this stays out of the production graph.
+serde_json = { workspace = true }
