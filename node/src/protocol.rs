@@ -30,6 +30,30 @@ pub struct InputBlob {
     pub commitment: [u8; 32],
 }
 
+/// A job handed to a serving coordinator over HTTP.
+///
+/// The counterpart to [`JobDispatch`], one layer up: a client submits this and
+/// the coordinator fans a `JobDispatch` out from it. What is *not* here is the
+/// point — no bytecode, no server key, no worker list, no quorum. Those belong
+/// to the coordinator process, which was started with them and checked them
+/// once; a submission that carried its own program could ask a coordinator to
+/// run something its workers never fetched a key for.
+///
+/// So a submission names a function and supplies ciphertext, and nothing else
+/// is negotiable. That is also what makes several submissions safe to run
+/// concurrently: they differ only in the two fields that cannot affect each
+/// other.
+#[derive(Debug, Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct JobSubmission {
+    /// Which exported function of the coordinator's program to run.
+    pub function: String,
+    /// Encrypted inputs, in the circuit's parameter order.
+    ///
+    /// Order is load-bearing and uncheckable downstream: these are ciphertext,
+    /// so a transposition yields a plausible answer to a different question.
+    pub inputs: Vec<Vec<u8>>,
+}
+
 /// A unit of work handed to a worker.
 #[derive(Debug, Clone, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct JobDispatch {

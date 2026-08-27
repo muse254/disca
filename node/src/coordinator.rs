@@ -78,7 +78,7 @@ use primitives::wire::{self, SealedResult};
 use primitives::{bytecode, validate};
 use tracing::{Span, info, info_span, warn};
 
-use crate::protocol::{InputBlob, JobDispatch, JobOutcome, JobReport};
+use crate::protocol::{InputBlob, JobDispatch, JobOutcome, JobReport, JobSubmission};
 use crate::transport;
 
 pub struct Config {
@@ -673,6 +673,22 @@ impl Coordinator {
     /// will hand each `JobRequested` to a thread that does the same. Two such
     /// threads share the registry lookup and nothing else — each job's grace,
     /// deadline and quorum are its own.
+    /// What a job decided, or `None` if this coordinator never accepted it.
+    ///
+    /// Reads the copy `settle` records rather than re-collecting: a job that
+    /// has already decided must give the same answer to every reader, and
+    /// re-running `collect` on a drained channel would not.
+    pub(crate) fn outcome(&self, job_id: u64) -> Option<Outcome> {
+        let job = self.job(job_id)?;
+        let outcome = job.outcome.lock().expect("job poisoned").clone();
+        Some(outcome)
+    }
+
+    /// The program hash a job ran under, for its attestation file.
+    pub(crate) fn bytecode_hash_of(&self, job_id: u64) -> Option<[u8; 32]> {
+        Some(self.job(job_id)?.verifier.bytecode_hash)
+    }
+
     pub(crate) fn settle(&self, job_id: u64) -> Result<Outcome, String> {
         let job = self
             .job(job_id)
@@ -717,6 +733,121 @@ impl Coordinator {
 /// One caller of [`Coordinator::accept_job`] among the two there will be
 /// (`next-architecture.md` §4, step 3). Everything specific to *this* caller
 /// lives here — a single job, taken from argv, whose settlement is written to
+/// Submits one job to a serving coordinator, optionally waiting for it.
+///
+/// Returns the job id. With `result_out`, polls `GET /result/<id>` until the
+/// job settles and writes the blob there — the same bytes `--result` writes for
+/// a one-shot run, and the same bytes `disca-cli decrypt` reads.
+///
+/// Polling rather than a held connection: a job takes seconds, `transport`'s
+/// client has a 30 s timeout, and a coordinator that had to hold a socket open
+/// per in-flight job would couple its concurrency to its file descriptors.
+pub fn submit(
+    coordinator: &str,
+    function: String,
+    inputs: Vec<Vec<u8>>,
+    result_out: Option<&std::path::Path>,
+    timeout: Duration,
+) -> Result<u64, String> {
+    let body = crate::protocol::encode(&JobSubmission { function, inputs })?;
+    let accepted = transport::post_for_body(&format!("http://{coordinator}/jobs"), body)?;
+    let job_id: u64 = String::from_utf8_lossy(&accepted)
+        .trim()
+        .parse()
+        .map_err(|e| format!("coordinator did not answer with a job id: {e}"))?;
+
+    let Some(path) = result_out else {
+        return Ok(job_id);
+    };
+
+    let url = format!("http://{coordinator}/result/{job_id}");
+    let deadline = Instant::now() + timeout;
+    loop {
+        match transport::get_status(&url)? {
+            // 202 is "still collecting", and is the reason this loop exists
+            // rather than a single request: a job that has not decided yet is
+            // not a job that failed.
+            (202, _) => {
+                if Instant::now() >= deadline {
+                    return Err(format!("job {job_id} did not settle within {timeout:?}"));
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+            (200, blob) => {
+                std::fs::write(path, &blob)
+                    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                return Ok(job_id);
+            }
+            (409, _) => return Err(format!("job {job_id} did not settle")),
+            (status, body) => {
+                return Err(format!(
+                    "coordinator answered {status}: {}",
+                    String::from_utf8_lossy(&body)
+                ));
+            }
+        }
+    }
+}
+
+/// Serves jobs over HTTP until killed.
+///
+/// The same coordinator as [`run`], with the job coming from a client rather
+/// than from argv. Everything a job needs that a submission does not carry —
+/// the program, the workers, the quorum — is fixed here and checked once, so a
+/// submission is a function name and some ciphertext.
+///
+/// The reason this exists is arithmetic. One frame of `ping-pong` is six
+/// independent jobs over the same six inputs, and a one-shot coordinator binds
+/// one port and runs one job, so six frames' worth of work took 22.8 s and
+/// 28.1 s per frame when measured serially. They differ only in which function
+/// they name; nothing stops them overlapping except a process boundary.
+pub fn run_serving(config: Config) -> Result<(), String> {
+    let program_hash = bytecode::hash_bytecode(&config.bytecode);
+
+    // Checked once, here, rather than per submission: every job this process
+    // accepts runs the same program under the same quorum, so a failure is a
+    // startup failure and not a surprise on the fourth frame.
+    if let Some(error) = quorum_error(config.attesters, config.workers.len()) {
+        return Err(error);
+    }
+    if config.registry.len() < config.attesters {
+        return Err(format!(
+            "--attesters {} is impossible with {} registered worker(s)",
+            config.attesters,
+            config.registry.len()
+        ));
+    }
+    check_program_exports(&config.bytecode)?;
+
+    let coordinator = Arc::new(Coordinator::new(config.server_key));
+    serve(
+        &config.bind,
+        coordinator,
+        Some(ServeConfig {
+            workers: config.workers.clone(),
+            registry: config.registry.clone(),
+            attesters: config.attesters,
+            bytecode: config.bytecode,
+            deadline: config.deadline,
+        }),
+    )?;
+
+    info!(
+        program_hash = %bytecode::hex(&program_hash),
+        workers = config.workers.len(),
+        registered = config.registry.len(),
+        attesters = config.attesters,
+        "coordinator serving; POST /jobs to submit"
+    );
+
+    // `serve` puts the listener on its own thread and returns, which is what
+    // `run` wants and what this does not. Park instead of spinning: every
+    // submission is handled on the listener thread and collected on its own.
+    loop {
+        thread::park();
+    }
+}
+
 /// files and whose failure is the process's exit code.
 pub fn run(config: Config) -> Result<(), String> {
     // Kept before the job is moved into its spec: the settled job's program is
@@ -734,7 +865,8 @@ pub fn run(config: Config) -> Result<(), String> {
     // milliseconds before the process exits, which is the right way round: the
     // alternative is a worker fetching a key from a coordinator that is not yet
     // listening.
-    serve(&config.bind, coordinator.clone())?;
+    // One job from argv, so nothing to submit and nothing to read back.
+    serve(&config.bind, coordinator.clone(), None)?;
 
     let started = Instant::now();
     let job_id = coordinator.accept_job(JobSpec {
@@ -911,6 +1043,23 @@ fn fresh_job_id() -> u64 {
 
 /// Checks up front that the blob is a program and that the function the job
 /// names exists and is runnable, and returns how many inputs it takes.
+/// Validates the program a serving coordinator was started with.
+///
+/// The function-specific half of [`check_program`] cannot run here — a serving
+/// coordinator does not know which function a submission will name until it
+/// arrives — so this checks what is knowable up front: that the blob decodes,
+/// and that it has something to run at all. `accept_job` does the rest per
+/// submission, which is where a bad function name becomes a 400 rather than a
+/// startup failure.
+fn check_program_exports(bytecode_blob: &[u8]) -> Result<(), String> {
+    let program = bytecode::deserialize(bytecode_blob).map_err(|e| e.to_string())?;
+    if program.functions().is_empty() {
+        return Err("the program defines no functions; there is nothing to serve".into());
+    }
+    info!(functions = program.functions().len(), "program accepted");
+    Ok(())
+}
+
 fn check_program(bytecode_blob: &[u8], function: &str) -> Result<usize, String> {
     // `deserialize` already validates every circuit it accepts (task 1.4), so
     // this rejects a malformed program before a worker is asked to spend
@@ -933,6 +1082,61 @@ fn check_program(bytecode_blob: &[u8], function: &str) -> Result<usize, String> 
     Ok(func.sig.params.len())
 }
 
+/// Everything a submission does not carry, because it must not.
+///
+/// A serving coordinator is started with one program, one worker set and one
+/// quorum, and checks them once. A submission then names a function and hands
+/// over ciphertext. Keeping these here rather than in [`JobSubmission`] is what
+/// stops a client asking for a program the workers hold no key for.
+#[derive(Clone)]
+pub struct ServeConfig {
+    pub workers: Vec<String>,
+    pub registry: Vec<Address>,
+    pub attesters: usize,
+    pub bytecode: Vec<u8>,
+    pub deadline: Duration,
+}
+
+/// Accepts a submission, dispatches it, and collects it on its own thread.
+///
+/// Returns as soon as the job is registered, so a client can submit the next
+/// one while this is evaluating. That concurrency is the whole point of serving
+/// rather than running one job per process: the six circuits of a frame are
+/// independent — same inputs, different outputs — and run sequentially they
+/// cost six times what they need to.
+fn accept_submission(
+    coordinator: &Arc<Coordinator>,
+    serve: &ServeConfig,
+    submission: JobSubmission,
+) -> Result<u64, String> {
+    let job_id = coordinator.accept_job(JobSpec {
+        // Minted here, not supplied. A client that chose its own id could
+        // collide with a job in flight, and worse, could name a job it did not
+        // submit and read its result back off `GET /result`.
+        job_id: None,
+        workers: serve.workers.clone(),
+        registry: serve.registry.clone(),
+        attesters: serve.attesters,
+        bytecode: serve.bytecode.clone(),
+        function: submission.function,
+        inputs: submission.inputs,
+        deadline: serve.deadline,
+    })?;
+
+    let collector = Arc::clone(coordinator);
+    thread::spawn(move || {
+        // The outcome is recorded on the job by `settle`, which is what
+        // `GET /result/<id>` reads. Nothing here needs the return value; a
+        // failure is already logged, and a job that does not settle answers
+        // that question through the same endpoint.
+        if let Err(error) = collector.settle(job_id) {
+            warn!(job_id, %error, "collecting a submitted job failed");
+        }
+    });
+
+    Ok(job_id)
+}
+
 /// Starts the HTTP surface: the server key by hash, and worker reports.
 ///
 /// One listener for the process, serving every job the coordinator has
@@ -945,7 +1149,11 @@ fn check_program(bytecode_blob: &[u8], function: &str) -> Result<usize, String> 
 /// pulls the server key and posts its report over it whether the job came from
 /// argv or from a `JobRequested` event. A second copy in `watcher.rs` would be
 /// a second place for `/results` routing to drift from what workers send.
-pub(crate) fn serve(bind: &str, coordinator: Arc<Coordinator>) -> Result<(), String> {
+pub(crate) fn serve(
+    bind: &str,
+    coordinator: Arc<Coordinator>,
+    serve_config: Option<ServeConfig>,
+) -> Result<(), String> {
     let server = tiny_http::Server::http(bind).map_err(|e| format!("cannot bind {bind}: {e}"))?;
     info!(bind = %bind, "coordinator listening");
 
@@ -1013,11 +1221,120 @@ pub(crate) fn serve(bind: &str, coordinator: Arc<Coordinator>) -> Result<(), Str
                 continue;
             }
 
+            // Submission and readback exist only when serving. A one-shot
+            // coordinator takes its job from argv and has nothing to offer
+            // here, and an endpoint that appears in one mode and 404s in the
+            // other is clearer than one that exists and refuses.
+            if let Some(serve_config) = &serve_config {
+                if url == "/jobs" && request.method() == &tiny_http::Method::Post {
+                    match transport::read_body(&mut request)
+                        .and_then(|body| crate::protocol::decode::<JobSubmission>(&body))
+                    {
+                        Ok(submission) => {
+                            let function = submission.function.clone();
+                            match accept_submission(&coordinator, serve_config, submission) {
+                                Ok(job_id) => {
+                                    info!(job_id, function = %function, "job submitted");
+                                    transport::respond(request, 202, job_id.to_string().as_bytes());
+                                }
+                                // A refusal here is the same class the CLI
+                                // reports at startup -- an unknown function, an
+                                // input count that does not match the circuit's
+                                // arity -- and is worth the same message.
+                                Err(error) => {
+                                    warn!(function = %function, %error, "refusing a submission");
+                                    transport::respond(request, 400, error.as_bytes());
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(%error, "rejecting a malformed submission");
+                            transport::respond(request, 400, error.as_bytes());
+                        }
+                    }
+                    continue;
+                }
+
+                // Task 2.4. It was deferred because the coordinator *was* the
+                // key holder, so there was nobody to serve; `disca-cli` holding
+                // the client key (4.3) is what gave it a reader.
+                if let Some(id) = url.strip_prefix("/result/") {
+                    respond_with_result(request, &coordinator, id);
+                    continue;
+                }
+
+                if let Some(id) = url.strip_prefix("/attestations/") {
+                    respond_with_attestations(request, &coordinator, id);
+                    continue;
+                }
+            }
+
             transport::respond(request, 404, b"not found");
         }
     });
 
     Ok(())
+}
+
+/// `GET /result/<jobId>`: the winning blob, still encrypted.
+///
+/// Four answers, and the distinction matters to a caller that is polling:
+/// 404 for a job this coordinator never accepted, 202 while it is still
+/// collecting, 409 for a job that will not settle, and 200 with the blob.
+/// Collapsing "not yet" into "no" would make a caller give up on a job that was
+/// still running.
+fn respond_with_result(request: tiny_http::Request, coordinator: &Coordinator, id: &str) {
+    let Some(outcome) = parsed_outcome(coordinator, id) else {
+        transport::respond(request, 404, b"no such job");
+        return;
+    };
+
+    match outcome {
+        Outcome::Collecting => transport::respond(request, 202, b"still collecting"),
+        Outcome::Unsettled => transport::respond(request, 409, b"job did not settle"),
+        Outcome::Settled(settlement) => {
+            // The bytes, not a JSON wrapper around them. This is exactly what
+            // `disca-cli decrypt` reads and what `fulfillJob` carries, and a
+            // caller that has to unwrap an encoding first is a caller that can
+            // get the unwrapping wrong.
+            transport::respond(request, 200, &settlement.result.blob)
+        }
+    }
+}
+
+/// `GET /attestations/<jobId>`: the signatures, in the shape `fulfillJob` takes.
+///
+/// The same bytes `--attestations` writes, from the same function, so a served
+/// job and a one-shot job produce identical evidence.
+fn respond_with_attestations(request: tiny_http::Request, coordinator: &Coordinator, id: &str) {
+    let Some(outcome) = parsed_outcome(coordinator, id) else {
+        transport::respond(request, 404, b"no such job");
+        return;
+    };
+
+    match outcome {
+        Outcome::Collecting => transport::respond(request, 202, b"still collecting"),
+        Outcome::Unsettled => transport::respond(request, 409, b"job did not settle"),
+        Outcome::Settled(settlement) => {
+            let Some(job_id) = id.parse::<u64>().ok() else {
+                transport::respond(request, 404, b"no such job");
+                return;
+            };
+            let json = attestations_json(
+                job_id,
+                &coordinator.bytecode_hash_of(job_id).unwrap_or_default(),
+                &settlement.result.hash,
+                &settlement.attesters,
+            );
+            transport::respond(request, 200, json.as_bytes());
+        }
+    }
+}
+
+/// The outcome of the job `id` names, or `None` if there is no such job.
+fn parsed_outcome(coordinator: &Coordinator, id: &str) -> Option<Outcome> {
+    let job_id = id.parse::<u64>().ok()?;
+    coordinator.outcome(job_id)
 }
 
 /// Fans one dispatch out to every worker.

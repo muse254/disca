@@ -115,6 +115,65 @@ pub fn get(url: &str) -> Result<Vec<u8>, String> {
     )
 }
 
+/// POSTs a body and returns the response body.
+///
+/// [`post`] discards it, because a dispatch's answer carries nothing beyond its
+/// status. A submission's answer is the job id, so this one keeps it.
+pub fn post_for_body(url: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+    let agent = agent();
+    let mut response = agent
+        .post(url)
+        .content_type("application/octet-stream")
+        .send(&body[..])
+        .map_err(|e| format!("POST {url} failed: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let detail = read_capped(
+            &mut response.body_mut().as_reader(),
+            MAX_PREALLOC_BYTES,
+            url,
+        )
+        .unwrap_or_default();
+        return Err(format!(
+            "POST {url} refused: HTTP {status}: {}",
+            String::from_utf8_lossy(&detail)
+        ));
+    }
+
+    read_capped(
+        &mut response.body_mut().as_reader(),
+        MAX_RESPONSE_BYTES,
+        url,
+    )
+}
+
+/// GETs a body *and* its status, without treating a non-2xx as an error.
+///
+/// [`get`] is right to refuse a non-2xx: handing a 404 page back as "the server
+/// key" is the bug it was written to prevent. But a caller polling for a result
+/// needs to tell 202 "still collecting" from 409 "did not settle" from 404 "no
+/// such job", and all three are answers rather than failures. Only transport
+/// errors are `Err` here.
+pub fn get_status(url: &str) -> Result<(u16, Vec<u8>), String> {
+    let agent = agent();
+    let mut response = match agent.get(url).call() {
+        Ok(response) => response,
+        // ureq 3.x returns `Err` for 4xx/5xx by default. Those are statuses
+        // this function exists to report, so unwrap them back out.
+        Err(ureq::Error::StatusCode(status)) => return Ok((status, Vec::new())),
+        Err(e) => return Err(format!("GET {url} failed: {e}")),
+    };
+
+    let status = response.status().as_u16();
+    let body = read_capped(
+        &mut response.body_mut().as_reader(),
+        MAX_RESPONSE_BYTES,
+        url,
+    )?;
+    Ok((status, body))
+}
+
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
