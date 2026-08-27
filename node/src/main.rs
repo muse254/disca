@@ -125,9 +125,10 @@ enum Role {
         #[arg(long)]
         bytecode: PathBuf,
 
-        /// Exported function within that program.
-        #[arg(long)]
-        function: String,
+        /// Exported function within that program. Required unless `--serve`,
+        /// where each submission names its own.
+        #[arg(long, required_unless_present = "serve")]
+        function: Option<String>,
 
         /// An encrypted input, from `disca-cli encrypt`. Repeat in argument
         /// order.
@@ -136,8 +137,22 @@ enum Role {
         /// which put the secrets in this process's `argv` — visible to anyone
         /// who can run `ps` on the machine that fans the job out, on a system
         /// whose claim is that no node sees them.
-        #[arg(long = "input", required = true)]
+        #[arg(long = "input", required_unless_present = "serve")]
         inputs: Vec<PathBuf>,
+
+        /// Stay up and take jobs over HTTP instead of running one from argv.
+        ///
+        /// `POST /jobs` submits a function name and its encrypted inputs and
+        /// returns a job id; `GET /result/<id>` and `GET /attestations/<id>`
+        /// read the answer back. Submissions are collected concurrently, which
+        /// is the point: one frame of `ping-pong` is six independent jobs over
+        /// the same inputs, and one-shot they cost six times what they need to.
+        ///
+        /// `--function`, `--input`, `--job-id`, `--result` and `--attestations`
+        /// are refused with it — those describe a single job, and a serving
+        /// coordinator does not have one.
+        #[arg(long, conflicts_with_all = ["function", "inputs", "job_id", "result_out", "attestations_out"])]
+        serve: bool,
 
         /// Run under a job id a chain already assigned, rather than minting one.
         ///
@@ -369,6 +384,42 @@ enum Role {
         faulty: bool,
     },
 
+    /// Submit a job to a serving coordinator and, optionally, wait for it.
+    ///
+    /// The client half of `coordinator --serve`. It exists because a submission
+    /// is `wincode`-encoded like every other message between these processes,
+    /// and asking a caller to reproduce that encoding — in a shell, or in a
+    /// desktop app that cannot link a binary-only crate — would mean either a
+    /// second wire format or a second implementation of this one.
+    ///
+    /// Prints the job id on stdout and nothing else, so `$(node submit ...)` is
+    /// the id.
+    Submit {
+        /// The serving coordinator.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        coordinator: String,
+
+        /// Exported function to run.
+        #[arg(long)]
+        function: String,
+
+        /// An encrypted input, in the circuit's parameter order. Repeat.
+        #[arg(long = "input", required = true)]
+        inputs: Vec<PathBuf>,
+
+        /// Wait for the job to settle and write its result blob here.
+        ///
+        /// Without it the command returns as soon as the job is accepted, which
+        /// is what a caller submitting a frame's worth of independent jobs
+        /// wants: submit all of them, then collect all of them.
+        #[arg(long = "result")]
+        result_out: Option<PathBuf>,
+
+        /// How long to wait for a result before giving up.
+        #[arg(long, default_value_t = 180)]
+        timeout_secs: u64,
+    },
+
     /// Print the Ethereum address a worker would attest under, and exit.
     ///
     /// The address is what a coordinator registers (`--registered-worker`) and
@@ -419,6 +470,7 @@ fn main() {
             workers,
             registry,
             attesters,
+            serve,
             job_id,
             server_key,
             bytecode,
@@ -435,7 +487,7 @@ fn main() {
                 .map(|path| read_blob(path))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            coordinator::run(coordinator::Config {
+            let config = coordinator::Config {
                 bind,
                 workers,
                 registry,
@@ -443,12 +495,23 @@ fn main() {
                 job_id,
                 server_key,
                 bytecode,
-                function,
+                // Clap guarantees this is present unless `--serve`, and
+                // `run_serving` never reads it. `unwrap_or_default` rather than
+                // `expect` so a future flag change degrades to an empty
+                // function name -- which `check_program` rejects by name --
+                // instead of a panic.
+                function: function.unwrap_or_default(),
                 inputs,
                 result_out,
                 attestations_out,
                 deadline: Duration::from_secs(deadline_secs),
-            })
+            };
+
+            if serve {
+                coordinator::run_serving(config)
+            } else {
+                coordinator::run(config)
+            }
         }),
 
         Role::Watcher {
@@ -519,6 +582,29 @@ fn main() {
             })
         }
 
+        Role::Submit {
+            coordinator,
+            function,
+            inputs,
+            result_out,
+            timeout_secs,
+        } => inputs
+            .iter()
+            .map(|path| read_blob(path))
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|blobs| {
+                coordinator::submit(
+                    &coordinator,
+                    function,
+                    blobs,
+                    result_out.as_deref(),
+                    Duration::from_secs(timeout_secs),
+                )
+            })
+            // The id on stdout and nothing else, like `worker-address`. A
+            // caller captures it; everything else this binary says is tracing.
+            .map(|job_id| println!("{job_id}")),
+
         Role::WorkerAddress { id, key } => worker::resolve_key(key.as_deref(), &id).map(|key| {
             // The one `println!` in this binary: a script substitutes this into
             // the coordinator's `--registered-worker`, and a tracing line would
@@ -561,6 +647,24 @@ fn main() {
 /// * **Mixed CPU architectures.** Zama document that outputs differ between x86
 ///   and ARM, so byte equality holds within an architecture and not across one.
 ///   A mixed fleet disagrees no matter what is pinned.
+/// * **Mixed CPU *features*, within one architecture.** This is narrower than
+///   "same ISA" and was missed until a cloud fleet made it concrete. What this
+///   function pins is the FFT *algorithm*; the SIMD width is chosen separately
+///   and at runtime. `tfhe_fft::dif4::fft_impl_dispatch` tries
+///   `pulp::x86::V4::try_new()` (AVX-512, compiled in because `tfhe`'s default
+///   features enable `avx512`) and falls back to `V3` (AVX2) — both CPUID
+///   probes, both reached with the plan below already installed. Different lane
+///   counts reassociate the butterflies differently, and floating-point
+///   addition is not associative, so two x86 workers can round differently.
+///   **Untested** — it needs two machines with different feature sets, which is
+///   why `docs/tasks.md` 5.3 specifies the test rather than asserting the
+///   outcome.
+/// * **Mismatched core counts.** `tfhe`'s carry propagation picks between a
+///   parallel and a sequential algorithm from `rayon::current_num_threads()`
+///   (`integer/server_key/radix_parallel/add.rs:518`), so the same addition can
+///   take different paths on machines with different core counts. This is task
+///   2.10e, and it stops being theoretical the moment workers stop sharing a
+///   host. Pin `RAYON_NUM_THREADS` across the fleet.
 /// * **GPU evaluation.** The `gpu` feature switches the default to multi-bit
 ///   parameters, which are documented as non-deterministic unless
 ///   `with_deterministic_execution()` is set. This build is CPU-only.

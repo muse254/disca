@@ -147,8 +147,9 @@ jobs:
           # genuine test failure, where the build was complete and only the
           # tests failed. That is worth losing to keep the cache truthful.
 
-      # committee-tally and simple-arithmetic are Rust only so rustc can emit
-      # WASM from them; the committed .wasm files are what the tests evaluate.
+      # committee-tally, ping-pong and simple-arithmetic are Rust only so
+      # rustc can emit WASM from them; the committed .wasm files are what the
+      # tests evaluate.
       # They build for the host from the workspace root — their
       # .cargo/config.toml only applies to cargo invoked from inside their
       # directory — but building them for wasm32 is what the demo actually
@@ -156,7 +157,7 @@ jobs:
       - name: build the demo circuits for wasm32
         run: |
           rustup target add wasm32-unknown-unknown
-          cargo build --release -p committee-tally -p simple-arithmetic \
+          cargo build --release -p committee-tally -p ping-pong -p simple-arithmetic \
             --target wasm32-unknown-unknown --locked
 
       # `primitives/tests/determinism_under_concurrency.rs` spawns concurrent
@@ -265,7 +266,15 @@ jobs:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          # Pinned for the same reason solc is pinned in bridge/foundry.toml,
+          # and found the hard way: `stable` moved to forge 1.8.0 overnight and
+          # test/FulfillGas.t.sol went red without a line of Solidity changing.
+          # 1.8.0 counts the measured call's calldata, plus a flat 40,300, into
+          # the `gasleft()` delta that the test calls execution gas -- exactly
+          # `old + calldata_gas + 40_300` at every M, so the contract costs what
+          # it always did and the meter moved. Unpin once the test measures
+          # something a forge release cannot redefine.
+          version: v1.7.1
 
       # solc is pinned in bridge/foundry.toml and downloaded on first use; the
       # attestation digest is a cross-language contract with
@@ -373,7 +382,8 @@ jobs:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          # Pinned; see the `contracts` job above for why this is not `stable`.
+          version: v1.7.1
       # bash -n and shellcheck before running it: a syntax error inside a
       # branch the run does not take would otherwise ship green.
       # Every script in the repository, not just this job's two. The narrower

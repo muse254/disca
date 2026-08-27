@@ -216,6 +216,27 @@ Three limits to keep in view:
    ARM, so byte equality is an ISA-homogeneity assumption, not a theorem. A
    mixed-ISA worker fleet will disagree no matter what is pinned — treat
    homogeneity as a registration requirement (task 2.10d).
+2a. **Same CPU *features*, which is narrower than the same ISA.** What
+   `pin_fft_plan` pins is the FFT *algorithm*. The SIMD width is a separate
+   choice made at runtime: `tfhe_fft::dif4::fft_impl_dispatch` probes
+   `pulp::x86::V4::try_new()` for AVX-512 — compiled in, because `tfhe`'s
+   default features enable `avx512` and this workspace does not set
+   `default-features = false` — then falls back to `V3` for AVX2. Both are
+   CPUID checks, and both run with the pinned plan already installed. Different
+   lane counts reassociate the butterflies, floating-point addition is not
+   associative, and so two *x86* workers can round differently.
+
+   This was missed until a cloud fleet made it concrete, and it is **untested**:
+   demonstrating it needs two machines with different feature sets, which is
+   what `tasks.md` 5.3 specifies. Until then treat it as a live hazard rather
+   than a settled one — the failure mode is honest workers disagreeing, which
+   the coordinator reads as a fault.
+2b. **Same core count.** `tfhe` chooses between parallel and sequential carry
+   propagation from `rayon::current_num_threads()`
+   (`integer/server_key/radix_parallel/add.rs:518`), so the same addition can
+   take different paths on machines with different core counts. Task 2.10e.
+   Pin `RAYON_NUM_THREADS` across a fleet rather than trusting the hardware to
+   match.
 3. **Call it early.** `setup_custom_fft_plan` panics if the plan for that size is
    already initialised, and decompressing a server key initialises it.
 

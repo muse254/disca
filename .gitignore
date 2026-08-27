@@ -26,3 +26,11 @@ bridge/broadcast/
 
 # Agent worktrees. Ephemeral, and each is its own checkout of this repo.
 .claude/
+
+# The GCP deployment plan. Kept out of the repository deliberately and kept on
+# disk: it names a specific cloud account's machine types, regions and costs,
+# which is operator detail rather than something the system's correctness rests
+# on. The one part other files did depend on -- the AVX-512/AVX2 divergence
+# experiment -- is written out in docs/tasks.md 5.3 so the repo stays
+# self-contained without it.
+docs/cloud.md

@@ -367,7 +367,10 @@ pub fn run(config: Config) -> Result<(), String> {
     // Up before the first event, for the same reason `coordinator::run` binds
     // before it accepts: a dispatch is immediately followed by workers pulling
     // `/keys/<hash>` from this process.
-    crate::coordinator::serve(&config.bind, coordinator.clone())?;
+    // No submission surface: this coordinator's jobs come from the chain,
+    // and an HTTP endpoint that accepted more would be a second, unauthenticated
+    // way to spend the workers this watcher is responsible for.
+    crate::coordinator::serve(&config.bind, coordinator.clone(), None)?;
 
     // Nothing below returns `Err`. A watcher that exits on a failed poll takes
     // every job currently evaluating down with it — the threads are this

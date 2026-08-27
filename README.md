@@ -9,6 +9,13 @@ the job, the program and the result it produced, so a third party can recover
 who stood behind an answer rather than taking the coordinator's word for it
 ([bridge.md](docs/bridge.md) §2a).
 
+New here? [getting-started.md](docs/getting-started.md) is the operator's path:
+prerequisites, the one command, and the same thing done by hand so you can see
+where each key and each ciphertext goes. Running it on more than one machine is
+where byte-reproducibility stops being free; what has to match is in
+[architecture.md](docs/architecture.md) §3, and the experiment that would settle
+the one open question is in [tasks.md](docs/tasks.md) 5.3.
+
 Design docs: [architecture.md](docs/architecture.md) (constraints, trust model)
 · [bridge.md](docs/bridge.md) (Ethereum boundary)
 · [attestation.md](docs/attestation.md) (why M-of-N, and what it costs)
@@ -19,6 +26,70 @@ must be pinned to be reproducible)
 
 Design decisions carry a pointer to the pull request that produced them, so the
 reasoning and the dead ends stay recoverable rather than only the conclusion.
+
+## How data moves
+
+One job, end to end. The thing to follow is which box ever holds a key that can
+decrypt: exactly one, and it is never on the network.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant KH as Key holder<br/>disca-cli
+    participant CH as Chain<br/>DiscaBridge.sol
+    participant WA as Watcher<br/>node watcher
+    participant CO as Coordinator
+    participant WK as Workers ×N
+
+    Note over KH: the client key is generated here<br/>and never leaves this box
+    KH->>KH: compile program.wasm → bytecode + bytecodeHash
+    KH->>KH: encrypt the inputs under the client key
+
+    KH->>CH: registerProgram(bytecodeHash, M)
+    KH->>CH: submitJob(commitments, input blobs) + escrow
+    CH-->>WA: JobRequested
+
+    WA->>CH: read the commitments from contract storage
+    Note over WA: each input blob is checked against the commitment<br/>the chain holds, not the one it was handed
+    WA->>CO: accept_job(jobId, bytecode, ciphertext)
+
+    CO->>WK: POST /jobs — bytecode + ciphertext
+    WK->>CO: GET /keys/{serverKeyHash} — pulled once, cached by hash
+    Note over WK: evaluation runs on ciphertext. the server key<br/>can evaluate, and cannot decrypt
+    WK->>CO: POST /results — resultHash + secp256k1 signature
+
+    Note over CO: settles when M of N workers sign the same<br/>byte-identical result. a worker that disagrees<br/>simply fails to join a quorum
+    CO-->>WA: winning blob + M attestations
+
+    WA->>CH: fulfillJob(jobId, resultHash, blob, signatures)
+    CH-->>KH: JobFulfilled(blob)
+    KH->>KH: decrypt under the client key
+```
+
+Three properties are visible in the arrows rather than asserted beside them.
+
+**The client key appears twice and never moves.** It encrypts at step 2 and
+decrypts at step 14, both inside the key holder. The key that travels to the
+workers at step 9 is the *server* key: it can evaluate a circuit over ciphertext
+and cannot open it, which is why serving it to anyone who asks for it by hash
+costs nothing.
+
+**Nobody is trusted to report their own work.** A result is accepted at step 11
+because M workers independently produced the *same bytes* and each signed a
+claim binding the job, the program and the result. A worker that diverges —
+lying, or merely misconfigured — fails to join a quorum, and the job expires
+into a refund rather than settling wrongly.
+
+**The watcher re-derives what it verifies.** At step 6 it checks each input blob
+against the commitment in contract storage rather than against the dispatch it
+was handed, so an endpoint that fabricates a log has to fabricate the job it
+names too.
+
+Without a chain — which is what `run-local.sh` and `run-pong.sh disca` do —
+steps 3 to 7 collapse into the key holder's own `POST /jobs`, and steps 11 to 13
+into `GET /result/<jobId>`. Everything between the coordinator and the workers is
+identical, which is the point: the chain decides who gets paid, not what the
+answer is.
 
 ## Running it
 
@@ -203,8 +274,62 @@ What is honest to say about the guarantee, rather than about the plumbing:
   cannot check that the plaintext a committee publishes is what the ciphertext
   contained. That needs verifiable decryption or a threshold KMS.
 
-What is left is on [tasks.md](docs/tasks.md), which is kept current rather than
-aspirational.
+### The checklist
+
+**74 done, 17 open.** [tasks.md](docs/tasks.md) carries each item with the
+reasoning that closed it, including the ones that were closed by deciding *not*
+to do them. This is the shape of it.
+
+| Track | Done | Open |
+|---|---:|---:|
+| 0 · Groundwork | 4 | 1 |
+| 1 · Execution core (`primitives/`) | 6 | 1 |
+| 1b · Observability | 3 | — |
+| 2 · Node roles and transport (`node/`) | 43 | 6 |
+| 2c · Formal specification (`spec/`) | 3 | 2 |
+| 2d · Coordinator as a job service | 3 | 1 |
+| 3 · Ethereum bridge (`bridge/`) | **5** | **—** |
+| 4 · Demo | 5 | 2 |
+| 5 · Running it off this laptop | 2 | 1 |
+| Stretch | — | 3 |
+
+Done, in the sense that a script exercises it end to end: the opcode set and its
+evaluator, bytecode with validation on receipt, M-of-N attestation over signed
+claims, server-key distribution by hash, the coordinator as an HTTP job service,
+the contract suite with the job state machine and the attester check, the chain
+watcher that settles a job with no human in the loop, a TLA+ model whose
+counterexample configurations are themselves checked, and two demos — an
+encrypted committee tally and a six-circuit rally.
+
+The seventeen open items are four different kinds of thing, and only one of them
+is a hazard.
+
+- **Needs a second machine — 2.10j, 5.3, and cheaply 2.10e.** Pinning the FFT
+  plan pins the *algorithm*, not the SIMD width: `tfhe_fft` probes for AVX-512
+  and falls back to AVX2, different lane counts reassociate the butterflies, and
+  floating-point addition is not associative. So two *x86* workers can disagree,
+  which makes `architecture.md` §3's "same architecture" insufficient. Untested,
+  and untestable on one host. 5.3 specifies the experiment and names the harness
+  that already exists for it. Until it runs, this is live.
+- **Unbuilt code — 2.10b, 2.10f, 2.10g, 2c.4.** Enforcing the reproducibility
+  preconditions at registration (which is waiting on the line above to know what
+  to enforce), keeping a disputed job a first-class outcome, fault modes for the
+  divergence we have actually seen — misconfiguration, not malice — and binding
+  the input commitments into the signed digest, where the current soundness is
+  incidental rather than stated.
+- **Decisions, not tasks — 0.5, 4.5, 4.7.** Two open questions to confirm and
+  strike, the demo video, and whether to adopt `experiment/pong-deflection`,
+  which is a better rally and moves the bytecode hash every recorded measurement
+  is pinned to.
+- **Recorded limits rather than queued work — 1.2b, 2c.5, 2d.4, and Stretch.**
+  The TLA+ model is single-job and unverified against the Rust by anything
+  stronger than a hash tripwire. That is written down so it cannot be mistaken
+  for a proof of more than it proves.
+
+One upstream item sits outside all four: 2.10d, an issue to file against
+`tfhe-rs` about `setup_custom_fft_plan` being public, `doc(hidden)`, absent from
+the release notes, and panicking if called late. The draft is in
+[tfhe-determinism-request.md](docs/tfhe-determinism-request.md).
 
 ## Research paper
 
