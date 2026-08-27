@@ -9,6 +9,13 @@ the job, the program and the result it produced, so a third party can recover
 who stood behind an answer rather than taking the coordinator's word for it
 ([bridge.md](docs/bridge.md) §2a).
 
+New here? [getting-started.md](docs/getting-started.md) is the operator's path:
+prerequisites, the one command, and the same thing done by hand so you can see
+where each key and each ciphertext goes. Running it on more than one machine is
+where byte-reproducibility stops being free; what has to match is in
+[architecture.md](docs/architecture.md) §3, and the experiment that would settle
+the one open question is in [tasks.md](docs/tasks.md) 5.3.
+
 Design docs: [architecture.md](docs/architecture.md) (constraints, trust model)
 · [bridge.md](docs/bridge.md) (Ethereum boundary)
 · [attestation.md](docs/attestation.md) (why M-of-N, and what it costs)

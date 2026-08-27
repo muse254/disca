@@ -164,12 +164,16 @@ Cheap, and unblocks estimating everything downstream.
 ### 2.4 Coordinator
 
 - [x] Serve `POST /results` (worker reports).
-- [ ] `GET /result/<jobId>` for the key holder. **No longer blocked** — the
-      reason it was deferred was that the coordinator *was* the key holder, and
-      task 4.3 split them: `disca-cli` holds the client key and never talks to a
-      worker. The coordinator writes the winning blob to `--result` today, which
-      is enough for a local run and not enough for a key holder on another
-      machine.
+- [x] `GET /result/<jobId>` for the key holder. The reason it was deferred was
+      that the coordinator *was* the key holder, and task 4.3 split them:
+      `disca-cli` holds the client key and never talks to a worker. Now four
+      answers rather than two, because the distinction matters to something that
+      is polling: 404 for a job this coordinator never accepted, 202 while it is
+      still collecting, 409 for a job that will not settle, 200 with the blob.
+      Collapsing "not yet" into "no" would make a caller give up on a job that
+      was still running. `GET /attestations/<jobId>` sits beside it and returns
+      the same bytes `--attestations` writes, from the same function, so a
+      served job and a one-shot job produce identical evidence.
 - [x] Dispatch a job to N workers concurrently.
 - [x] Collect reports until M agree on an attestation hash, or the deadline
       passes.
@@ -333,10 +337,30 @@ to 6 of 6. Full write-up in architecture.md §3.
 - [ ] **2.10d Raise it upstream.** `setup_custom_fft_plan` is public but
       `#![doc(hidden)]`, absent from the docs and release notes, and panics if
       called late. Draft issue in `docs/tfhe-determinism-request.md`.
-- [ ] **2.10e Re-check the parallel carry-propagation path.** `add.rs` selects an
-      algorithm from `rayon::current_num_threads()`, which would diverge across
-      machines with different core counts. Not reproduced on our circuit shape;
-      confirm it cannot bite before relying on cross-machine agreement.
+- [ ] **2.10e Re-check the parallel carry-propagation path.** Located:
+      `should_parallel_propagation_be_faster(..., rayon::current_num_threads())`
+      at `tfhe-1.5.0/src/integer/server_key/radix_parallel/add.rs:518`, choosing
+      between `CarryPropagationAlgorithm::Parallel` and `Sequential`. Not
+      reproduced on our circuit shape, and it cannot be while every worker
+      shares one host — which is exactly why it stops being theoretical the
+      moment a fleet does not. Mitigation is cheap and available now: pin
+      `RAYON_NUM_THREADS` identically across workers rather than trusting core
+      counts to match, and test it with the two-run comparison in 5.3.
+- [ ] **2.10j The FFT plan pins the algorithm, not the SIMD width.** Found while
+      designing a cloud fleet, and it makes the precondition list narrower than
+      it read. `tfhe_fft::dif4::fft_impl_dispatch` probes
+      `pulp::x86::V4::try_new()` (AVX-512, compiled in because `tfhe`'s defaults
+      enable `avx512`) then `V3` (AVX2) — CPUID checks, reached with the pinned
+      plan already installed. Different lane counts reassociate the butterflies
+      and floating-point addition is not associative, so **two x86 workers can
+      disagree**. `architecture.md` §3 said "same architecture"; that is not
+      sufficient.
+
+      **Untested**, and untestable on one machine: it needs two hosts with
+      different feature sets. 5.3 specifies the experiment and names the harness
+      that already exists for it. Until it runs, this is a live hazard rather
+      than a settled one, and it belongs in whatever 2.10b ends up checking at
+      registration.
 
 ## Track 2c — Formal specification (`spec/`)
 
@@ -470,6 +494,85 @@ the absence of per-job state was.
       three things that are still trusted (single key holder, closed worker set,
       trusted `reveal`) are named there rather than left for a reader to
       discover. The video is what remains.
+- [x] **4.6 A demo that runs longer than a screenshot.** `ping-pong/` is the
+      rally: six circuits over encrypted state (`ball_x`, `ball_y`, `vel_x`,
+      `vel_y`, `paddle_y`, `score`), lowered from one wasm module, 174 opcodes
+      and `bytecode_hash=0x612693a4`. It exists because the tally settles in a
+      second and then there is nothing to watch — a demo needs state that
+      carries from frame to frame, and this is the smallest thing that has some.
+
+      `scripts/run-pong.sh` is the single entry point, five modes:
+      `rally` and `step` in the terminal, `web` in a browser at three speeds,
+      `circuit` to dump the lowered opcodes, and `disca` — the real one — which
+      runs a frame as **six jobs across three workers under FHE**, each settled
+      on a 2-of-3 byte-identical quorum. The chain of evidence is what makes it
+      worth having: the same wasm produces the same frame 1 in Rust, in the
+      browser, and under encryption on three processes that never see a
+      plaintext.
+
+      Three things it found. **The ball passed through the paddle**, because
+      `ball_x` was never given it. **One frame costs 33-40 s idle and 219 s
+      under load average 8.9** — the pace is not a constant to be quoted but a
+      property of the host, which is a sizing input for Track 5. And a miss
+      detector written the natural way is **unfalsifiable**: `clamp_to` floors
+      `ball_x` at zero, so `ball_x < 0` reports zero misses forever, on any
+      circuit, at any velocity, and reads as a rally that cannot be lost.
+- [ ] **4.7 Decide on `experiment/pong-deflection`.** The angle off the paddle
+      is fixed, so the rally is decided from frame one; the branch makes contact
+      position set `vel_y` and the paddle then saves 79 of 196 rather than 166
+      of 189. Not merged, and the reason is not the mechanic: adopting it moves
+      the bytecode hash to `0x4524ede8` and every frame time, cost table and
+      cross-mode fixture in this repository is pinned to the current circuit.
+      It also costs 49 opcodes rather than the ~6 the change looks like, because
+      `hit_paddle` is 17 opcodes that `vel_x` and `score` already compute and
+      single-output circuits cannot share a subexpression — it would run three
+      times a frame, 51 of 223 opcodes. That last number is the first concrete
+      argument for stretch item 1 (circuit partitioning) coming from a real
+      circuit rather than from architecture.md.
+
+## Track 5 — Running a node somewhere other than this laptop
+
+Not on the original list. Everything above runs three worker processes on one
+host, which is exactly the configuration in which the reproducibility hazards
+cannot appear.
+
+- [x] **5.1 A deployment plan sized against the measurements.** Written, and
+      **deliberately not in this repository** — `docs/cloud.md` is gitignored and
+      lives on the operator's disk. It names one cloud account's machine types,
+      regions, quotas and prices, none of which the system's correctness rests
+      on, and all of which go stale on someone else's billing page rather than
+      in a commit. `docs/getting-started.md` is the half that *is* tracked: how
+      to run a node before running three, with nothing account-specific in it.
+- [x] **5.2 Size it for the rally as well as the tally.** The answer flips.
+      A tally is one job of ~1 s and the cheap instance wins; one Pong frame is
+      six jobs of ~35 s and the machine shape starts to matter.
+- [ ] **5.3 Run 2.10j's experiment: do AVX-512 and AVX2 hosts produce different
+      result bytes?** Two hosts with different SIMD widths is the one thing this
+      repository cannot test on the machine it is written on, and it is the
+      difference between a stated precondition and a checked one. Until it runs,
+      2.10b does not know what to enforce.
+
+      Written out here rather than left to the deployment plan, because it is
+      the one part of that document the rest of the repository depended on and
+      the harness for it is already tracked. `primitives/examples/cross_process.rs`
+      reads a fixed key and fixed inputs from disk with the transport removed
+      ([attestation.md](attestation.md) §7):
+
+      1. `cross_process setup` once, on any machine.
+      2. Copy the resulting directory to a host **with** AVX-512 and to a host
+         **without** it. On GCP today that is a `C3` against an `N2D` or `T2D`;
+         what matters is the feature tier, not the vendor.
+      3. `cross_process eval` on each, and compare the two result hashes.
+
+      Two instance-hours answers it definitively, and the answer belongs in
+      `architecture.md` §3 either way — equal hashes narrow the precondition to
+      something registration can check, differing hashes make 2.10b mandatory
+      before any fleet spans machine types.
+
+      The sibling question is cheaper and needs no second machine: run
+      `cross_process eval` twice with different `RAYON_NUM_THREADS` and compare.
+      That is 2.10e, which is currently "not reproduced" rather than "cannot
+      happen".
 
 ## Stretch (only if the above is done)
 
