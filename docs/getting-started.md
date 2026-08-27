@@ -361,6 +361,200 @@ to **push**. The hook deliberately never runs `cargo update`;
 `scripts/check-deps.sh --report` shows what an update *would* change without
 changing anything.
 
+## Running your own program
+
+Everything above runs a program that ships with the repository. This is the same
+path with a program you wrote. It takes four commands, and the worked example
+below is copy-pasteable — every number in it came from actually running it.
+
+### What a DISCA program is allowed to be
+
+A circuit, not a program. There is no memory, no control flow that survives
+lowering, and no I/O — a function becomes a fixed list of operations over
+ciphertext, evaluated in full every time. Concretely:
+
+- **One WASM module**, built for `wasm32-unknown-unknown` as a `cdylib`.
+- **Exported functions** — `#[unsafe(no_mangle)] pub extern "C"`. The exported
+  name is what you pass to `--function`.
+- **`i32` in, one `i32` out.** Parameters are the encrypted inputs, in order.
+  A function returning several values is not expressible: results are
+  single-valued, which is why one Pong frame is six circuits rather than one.
+- **These operations only:** `Add`, `Sub`, `Mul`, `Eq`, `Ne`, `Eqz`, `Lt`,
+  `Gt`, `Le`, `Ge`, `Select`, `Const`, `Drop`, and the local get/set/tee.
+  Notably **no division and no shifts**, and `Mul` costs about nine adds
+  (2,040 ms against 225 ms — [architecture.md](architecture.md) §2).
+- **No branches, no loops, no indexing.** An `if` must be expressible as a
+  `select`, which means *both* sides are always evaluated. Fixed-bound loops
+  are fine because they unroll. Anything that would need a runtime jump — a
+  `while` on encrypted data, an array index computed from a secret — cannot be
+  lowered, and there is no way around it: branching on a ciphertext would leak
+  the bit it branched on.
+- **Release builds only.** A debug build keeps a stack-pointer global and fails
+  with `unsupported operator: GlobalGet { global_index: 0 }`.
+
+`disca-cli compile` validates all of this and refuses the module rather than
+letting a worker discover it minutes into an FHE evaluation.
+
+### 1. Write it
+
+Any crate laid out like this works. It does not need to be inside this
+repository.
+
+```toml
+# Cargo.toml
+[workspace]           # keeps it out of any parent workspace
+
+[package]
+name = "clamp-demo"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+```
+
+```toml
+# .cargo/config.toml — so `cargo build` targets wasm without a flag
+[build]
+target = "wasm32-unknown-unknown"
+```
+
+```rust
+// lib.rs — note that both arms of each `if` are always evaluated
+#[unsafe(no_mangle)]
+pub extern "C" fn clamp(x: i32, lo: i32, hi: i32) -> i32 {
+    let x = if x < lo { lo } else { x };
+    if x > hi { hi } else { x }
+}
+```
+
+```sh
+cargo build --release
+```
+
+### 2. Lower it to bytecode
+
+```sh
+disca-cli compile \
+  --input target/wasm32-unknown-unknown/release/clamp_demo.wasm \
+  --output clamp.bytecode
+# bytecode_hash=0x7bff3a4a02b0f4f8455f3df5106c6e52e48c1bc274ad10b82895cdd910f6431d
+```
+
+That hash is the program's identity everywhere else — it is what a worker
+attests to and what `registerProgram` stores on-chain. To see what your source
+actually became:
+
+```sh
+cargo run --release --example inspect -p primitives -- \
+  target/wasm32-unknown-unknown/release/clamp_demo.wasm
+```
+
+```text
+clamp(3 param) -> 1 | 0 local, 12 ops
+  peak stack 4 ciphertext(s), 4 split point(s)
+    0  LocalGet(0)     3  LocalGet(1)    6  LocalTee(1)     9  LocalGet(2)
+    1  LocalGet(1)     4  Gt             7  LocalGet(2)    10  Lt
+    2  LocalGet(0)     5  Select         8  LocalGet(1)    11  Select
+```
+
+Two comparisons and two selects. At the measured per-gate costs
+([architecture.md](architecture.md) §2) that is 2×141 ms + 2×200 ms ≈ **0.7 s**
+of actual homomorphic work — the rest of the wall clock below is installing a
+30 MB server key on three workers, which a serving coordinator pays once rather
+than per job. Worth reading the listing before you run anything: it is where an
+innocent `if` becomes work that is always paid, on both branches.
+
+### 3. Encrypt the inputs
+
+```sh
+disca-cli keygen  --out-dir keys
+disca-cli encrypt --client-key keys/client.key --values 42,0,10 --out-dir ct
+```
+
+`--values` is positional: `42,0,10` binds to `x, lo, hi`. `keygen` prints the
+server key's hash and `encrypt` prints one commitment per input — those are the
+values `submitJob` takes if you are going through the chain.
+
+**`keys/client.key` is the only thing that can read a result.** It never goes to
+a worker, a coordinator, or the chain. `keys/server.key` does travel, and cannot
+decrypt anything.
+
+### 4. Run it
+
+Three workers and a coordinator, 2-of-3, exactly as in
+[the one command](#the-one-command) but pointed at your bytecode:
+
+```sh
+for id in w1 w2 w3; do REG="$REG --registered-worker $(node worker-address --id $id)"; done
+
+node worker --id w1 --bind 127.0.0.1:9091 &
+node worker --id w2 --bind 127.0.0.1:9092 &
+node worker --id w3 --bind 127.0.0.1:9093 &
+
+node coordinator \
+  --worker 127.0.0.1:9091 --worker 127.0.0.1:9092 --worker 127.0.0.1:9093 \
+  $REG --attesters 2 \
+  --server-key keys/server.key \
+  --bytecode clamp.bytecode \
+  --function clamp \
+  --input ct/input-0.ct --input ct/input-1.ct --input ct/input-2.ct \
+  --result result.blob --deadline-secs 120
+```
+
+```text
+INFO job settled result_bytes=12075 elapsed_ms=18922
+     result_hash=0xd19a0148…  attesters=0x05e9a756…,0xd315a4ed…,0xdef52eba…
+```
+
+18.9 s for 0.7 s of gates, because a one-shot coordinator loads the keys and
+serves the server key to every worker before it can start. That ratio is the
+argument for `--serve` below, not for a faster machine.
+
+Then read the answer, which only the client key can do:
+
+```sh
+disca-cli decrypt \
+  --client-key keys/client.key --server-key keys/server.key --input result.blob
+# 10
+```
+
+`clamp(42, 0, 10) = 10`, computed by three processes that never saw `42`.
+
+### Submitting many jobs to one coordinator
+
+The command above is one job per coordinator process, which reloads the keys
+and re-serves the 30 MB server key every time. For repeated jobs against the
+same program, run the coordinator as a service instead:
+
+```sh
+node coordinator --serve --bind 127.0.0.1:8080 \
+  --worker … $REG --attesters 2 \
+  --server-key keys/server.key --bytecode clamp.bytecode
+```
+
+```sh
+curl -s --data-binary @job.json http://127.0.0.1:8080/jobs   # -> a job id
+curl -s http://127.0.0.1:8080/result/1        -o result.blob # 202 until settled
+curl -s http://127.0.0.1:8080/attestations/1                 # the signatures
+```
+
+`GET /result/<jobId>` answers 404 for a job it never accepted, 202 while it is
+still collecting, 409 for one that will not settle, and 200 with the blob.
+`scripts/run-pong.sh disca` is a worked example of driving it — six jobs per
+frame against one running coordinator.
+
+### When it does not work
+
+| What you see | What it means |
+|---|---|
+| `unsupported operator: GlobalGet { global_index: 0 }` | Debug build — that global is the stack pointer. Use `--release`. |
+| `unsupported operator: Block { blockty: Empty }` | Control flow that survived optimisation. A loop produces this, and so does **division**, because `a / b` emits a zero check. Rewrite as `select`, or drop the division. |
+| `the program exports no function named …` | `--function` takes the exported symbol, not the Rust path. Check it against `inspect`. |
+| Job never settles, no disagreement logged | A worker is slower than `--deadline-secs`. Raise it before concluding anything — a slow honest worker and a faulty one look identical from here. |
+| `attestation disagreement` with all three differing | The workers are not byte-reproducible with each other. See [architecture.md](architecture.md) §3. |
+
 ## Where to go next
 
 - [architecture.md](architecture.md) — the constraints, the measured FHE costs,

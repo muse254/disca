@@ -2652,4 +2652,202 @@ mod tests {
         let error = check_program(b"not bytecode", "tally4_select").unwrap_err();
         assert!(!error.is_empty(), "the rejection has to say something");
     }
+
+    /// A port nothing else is on, taken by binding and immediately releasing.
+    ///
+    /// Racy in principle, and the alternative is worse: a hardcoded port makes
+    /// two test binaries on one machine fail each other, which is the failure
+    /// that gets rerun until it passes rather than investigated.
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("the OS has a spare port");
+        listener
+            .local_addr()
+            .expect("a bound listener has an address")
+            .port()
+    }
+
+    /// A serving coordinator whose three workers are addresses nothing is
+    /// listening on.
+    ///
+    /// Deliberate rather than a shortcut. The workers have to *exist* -- a
+    /// quorum is checked against the fleet size, so an empty worker list is
+    /// refused at submission -- but they must never answer, because a job that
+    /// stays `Collecting` until its deadline is the state the polling endpoint
+    /// has to tell apart from "settled" and from "never existed". Against a job
+    /// that settles in milliseconds these tests would be racing it rather than
+    /// checking the answer.
+    fn serving() -> String {
+        let bind = format!("127.0.0.1:{}", free_port());
+        let unreachable: Vec<String> = (0..3)
+            .map(|_| format!("127.0.0.1:{}", free_port()))
+            .collect();
+        serve(
+            &bind,
+            Arc::new(coordinator()),
+            Some(ServeConfig {
+                workers: unreachable,
+                registry: ["w1", "w2", "w3"]
+                    .iter()
+                    .map(|l| worker(l).address())
+                    .collect(),
+                attesters: 2,
+                bytecode: tally_bytecode(),
+                deadline: Duration::from_secs(30),
+            }),
+        )
+        .expect("the port was free a moment ago");
+        bind
+    }
+
+    fn serving_config(attesters: usize, workers: usize, registered: usize) -> Config {
+        Config {
+            bind: format!("127.0.0.1:{}", free_port()),
+            workers: (0..workers)
+                .map(|i| format!("127.0.0.1:{}", 9000 + i))
+                .collect(),
+            registry: ["w1", "w2", "w3", "w4"][..registered]
+                .iter()
+                .map(|l| worker(l).address())
+                .collect(),
+            attesters,
+            server_key: Vec::new(),
+            bytecode: tally_bytecode(),
+            function: "tally4_select".into(),
+            inputs: Vec::new(),
+            result_out: None,
+            job_id: None,
+            attestations_out: None,
+            deadline: Duration::from_secs(30),
+        }
+    }
+
+    #[test]
+    fn serving_refuses_a_quorum_its_worker_count_cannot_reach() {
+        // A startup failure, not a surprise on the fourth frame. `run_serving`
+        // accepts many jobs under one configuration, so a quorum that can never
+        // form would otherwise be discovered once per job, forever, by a client
+        // that cannot see why.
+        let error = run_serving(serving_config(4, 3, 4)).unwrap_err();
+        assert!(
+            error.contains('4') && error.contains('3'),
+            "names the quorum and the fleet it cannot come from: {error}"
+        );
+    }
+
+    #[test]
+    fn serving_refuses_a_registry_smaller_than_the_quorum() {
+        // Distinct from the check above: three workers can physically answer,
+        // but only two of them are registered, so only two attestations can
+        // ever count and a 3-of-3 quorum is unreachable for a second reason.
+        let error = run_serving(serving_config(3, 3, 2)).unwrap_err();
+        assert!(
+            error.contains("registered worker"),
+            "says it is the registry that is short, not the fleet: {error}"
+        );
+    }
+
+    #[test]
+    fn a_result_is_404_for_a_job_this_coordinator_never_accepted() {
+        // The distinction that matters to something polling: 404 is "no such
+        // job", not "not yet". A client that treats them alike either gives up
+        // on a running job or waits forever for one that does not exist.
+        let bind = serving();
+
+        let (status, _) = transport::get_status(&format!("http://{bind}/result/999")).unwrap();
+        assert_eq!(status, 404, "a job id nothing minted");
+
+        let (status, _) =
+            transport::get_status(&format!("http://{bind}/attestations/999")).unwrap();
+        assert_eq!(status, 404, "and the same for its signatures");
+    }
+
+    #[test]
+    fn a_result_id_that_is_not_a_number_is_404_rather_than_a_panic() {
+        // `/result/<id>` parses the tail of a URL a stranger controls. Anything
+        // that is not a u64 has to be an answer, not a thread that dies and
+        // takes the listener with it.
+        let bind = serving();
+
+        for id in ["banana", "-1", "99999999999999999999999999", ""] {
+            let (status, _) = transport::get_status(&format!("http://{bind}/result/{id}")).unwrap();
+            assert_eq!(status, 404, "{id:?} is not a job id");
+        }
+    }
+
+    #[test]
+    fn a_submission_is_given_an_id_the_client_did_not_choose() {
+        // The id is minted here rather than supplied, and two submissions must
+        // not collide: a client that could name its own job could name one it
+        // did not submit and read the result off `GET /result`.
+        let bind = serving();
+        // Four inputs because `tally4_select` takes four. The coordinator
+        // checks the count against the circuit's arity before it dispatches;
+        // it cannot check the bytes, which are ciphertext it holds no key for.
+        let body = |f: &str| {
+            crate::protocol::encode(&JobSubmission {
+                function: f.to_string(),
+                inputs: vec![b"ciphertext".to_vec(); 4],
+            })
+            .unwrap()
+        };
+
+        let url = format!("http://{bind}/jobs");
+        let first = transport::post_for_body(&url, body("tally4_select")).unwrap();
+        let second = transport::post_for_body(&url, body("tally4_select")).unwrap();
+
+        let id = |b: Vec<u8>| String::from_utf8_lossy(&b).trim().parse::<u64>().unwrap();
+        let (first, second) = (id(first), id(second));
+        assert_ne!(first, second, "two submissions, two jobs");
+
+        // And the id it minted is the one it will answer for.
+        let (status, _) = transport::get_status(&format!("http://{bind}/result/{first}")).unwrap();
+        assert_eq!(status, 202, "dispatched to nobody, so still collecting");
+    }
+
+    #[test]
+    fn a_submission_naming_an_unexported_function_is_refused_before_dispatch() {
+        // The program is fixed at startup and the submission only names a
+        // function in it. A name that is not there is the client's error and
+        // has to come back as one, rather than as a job that quietly never
+        // settles.
+        let bind = serving();
+        let body = crate::protocol::encode(&JobSubmission {
+            function: "tally5_select".into(),
+            inputs: vec![b"ciphertext".to_vec(); 4],
+        })
+        .unwrap();
+
+        let error = transport::post_for_body(&format!("http://{bind}/jobs"), body).unwrap_err();
+        assert!(
+            error.contains("tally5_select"),
+            "names the function: {error}"
+        );
+    }
+
+    #[test]
+    fn submitting_to_something_that_is_not_a_coordinator_says_so() {
+        // `submit` parses the response body as a job id. A server that answers
+        // 200 with something else -- a proxy, a login page, the wrong port --
+        // must produce a message about the answer rather than a parse panic.
+        let bind = format!("127.0.0.1:{}", free_port());
+        let server = tiny_http::Server::http(&bind).unwrap();
+        thread::spawn(move || {
+            for request in server.incoming_requests() {
+                transport::respond(request, 200, b"<html>not a job id</html>");
+            }
+        });
+
+        let error = submit(
+            &bind,
+            "tally4_select".into(),
+            Vec::new(),
+            None,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("did not answer with a job id"),
+            "blames the answer, not the parser: {error}"
+        );
+    }
 }
