@@ -57,9 +57,9 @@ COVER_ARGS=(
   --all-features
 )
 
-# The two demo-circuit crates are filtered out of the report rather than
-# measured. They are Rust only so that rustc can emit WASM from them: the
-# committed .wasm binaries are what `primitives/tests/tally_circuit.rs` actually
+# The demo-circuit crates are filtered out of the report rather than measured.
+# They are Rust only so that rustc can emit WASM from them: the committed
+# .wasm binaries are what `primitives/tests/tally_circuit.rs` actually
 # evaluates, so the host-built copies of `max2`, `tally4_select` and friends are
 # unreachable by construction and no honest test can execute them. Counting them
 # would put 45 uncoverable lines in the denominator and say nothing about
@@ -72,7 +72,7 @@ COVER_ARGS=(
 # lurch for a reason nobody can explain.)
 REPORT_ARGS=(
   --ignore-filename-regex
-  '((committee-tally|simple-arithmetic)/lib\.rs|/examples/)'
+  '((committee-tally|ping-pong|simple-arithmetic)/lib\.rs|/examples/)'
 )
 
 echo "==> running the test suite under instrumentation"
